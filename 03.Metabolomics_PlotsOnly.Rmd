@@ -1,0 +1,698 @@
+---
+title: "04.Metabolomics"
+author: "Kelsey Huus"
+date: "2024-07-29"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+##Packages
+library(dplyr)
+library(ggplot2)
+#library(data.table)
+library(tidyr)
+library(Maaslin2)
+library(ggrepel)
+```
+
+
+```{r import1}
+#import metadata
+#updated: this version also excludes SERIES 2 of all double series.
+meta_seq <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/meta_seq_clean_series1.24.08.18.csv", 
+                     row.names=1)
+meta_seq <- meta_seq %>% filter(!is.na(fever7d_aboveavg))
+length(meta_seq$SampleID)
+
+#define DIET 3
+meta_seq$Diet3 <- ifelse(meta_seq$Diet %in% c("Vegan", "Vegetarian"), yes="Veg", no="Omni")
+meta_seq$Diet3 <- factor(meta_seq$Diet3, levels=c("Veg", "Omni"))
+
+#per-person metadata, matching
+meta <- meta_seq %>% filter(!duplicated(Participant_ID)&!is.na(fever7d_aboveavg)) %>%
+  dplyr::select(-c(SampleID, Relative_Day, Time0, Time01))
+length(meta$Participant_ID) #final number of participants
+
+```
+
+```{r cholesterol}
+cholesterol <- read.csv("/ebio/abt3_projects2/uHEAT2/data/cholesterol/Cholesterol_interpolations_all.csv")
+cholesterol$Participant_ID <- sapply(strsplit(cholesterol$Sample,"_"), `[`, 1)
+cholesterol$Participant_ID <- gsub("H", "HEAT_", cholesterol$Participant_ID)
+cholesterol$Cholesterol_Type <- sapply(strsplit(cholesterol$Sample,"_"), `[`, 3)
+head(cholesterol)
+
+#rearrange
+cholesterol2 <- cholesterol %>% 
+  dplyr::select(c(Participant_ID, Cholesterol_Type, Plate, Cholesterol_mg.dL)) %>%
+  filter(Participant_ID!="blank") %>%
+  pivot_wider(names_from=Cholesterol_Type, values_from=Cholesterol_mg.dL) %>%
+  rename(HDL_Cholesterol_mg.dL=HDL, LDL_Cholesterol_mg.dL=LDL) %>%
+  mutate(Total_Cholesterol_mg.dL=HDL_Cholesterol_mg.dL+LDL_Cholesterol_mg.dL)
+head(cholesterol2)
+tail(cholesterol2)
+#there are a few technical duplicates, take the first (non duplicated) value
+cholesterol2 <- cholesterol2 %>% filter(!duplicated(Participant_ID))
+
+#add metadata
+cholesterol_meta <- full_join(cholesterol2, meta) %>% 
+  filter(!is.na(Total_Cholesterol_mg.dL)&!duplicated(Participant_ID)&!is.na(fever7d_aboveavg))
+
+#test by fever
+pdata2 <- cholesterol_meta %>% filter(!is.na(fever7d_aboveavg))
+pdata2$fever7d_aboveavg <- factor(pdata2$fever7d_aboveavg, levels=c("lo", "hi"))
+pdata2$Cholesterol_ratio <- pdata2$LDL_Cholesterol_mg.dL / pdata2$HDL_Cholesterol_mg.dL
+
+wilcox.test(pdata2$Total_Cholesterol_mg.dL~pdata2$fever7d_aboveavg) #p=0.86
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT2/data/cholesterol/Fever_totalCholesterol_plates1-10.pdf")
+p <- ggplot(pdata2, aes(x=fever7d_aboveavg, y=Total_Cholesterol_mg.dL)) + geom_boxplot() + geom_jitter(width=0.1, height=0) 
+p <- p + theme_bw()
+p <- p + annotate('segment', x=1, xend=2, y=2.5, yend=2.5)
+p <- p + annotate('text', label=c("NS"), x=1.5, y=2.6)
+p
+#dev.off()
+
+wilcox.test(pdata2$LDL_Cholesterol_mg.dL~pdata2$fever7d_aboveavg) #p=0.36
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT2/data/cholesterol/Fever_LDLCholesterol_plates1-10.pdf")
+p <- ggplot(pdata2, aes(x=fever7d_aboveavg, y=LDL_Cholesterol_mg.dL)) + geom_boxplot() + geom_jitter(width=0.1, height=0)
+p <- p + theme_bw()
+p <- p + annotate('segment', x=1, xend=2, y=2, yend=2)
+p <- p + annotate('text', label=c("NS"), x=1.5, y=2.1)
+p
+#dev.off()
+
+wilcox.test(pdata2$HDL_Cholesterol_mg.dL~pdata2$fever7d_aboveavg) #p=0.136 #hmph.
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT2/data/cholesterol/Fever_HDLCholesterol_plates1-10.pdf")
+p <- ggplot(pdata2, aes(x=fever7d_aboveavg, y=HDL_Cholesterol_mg.dL)) + geom_boxplot() + geom_jitter(width=0.1, height=0)
+p <- p + theme_bw()
+p <- p + annotate('segment', x=1, xend=2, y=1, yend=1)
+p <- p + annotate('text', label=c("p=0.13"), x=1.5, y=1.1)
+p
+#dev.off()
+
+wilcox.test(pdata2$Cholesterol_ratio~pdata2$fever7d_aboveavg) #p=0.02 #indeed
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/2C.CholesterolRatio.pdf")
+p <- ggplot(pdata2, aes(x=fever7d_aboveavg, y=Cholesterol_ratio, colour=fever7d_aboveavg)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  annotate('segment', x=1, xend=2, y=6, yend=6) + 
+  annotate('text', label=c("*"), x=1.5, y=6.2, size=5) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) + 
+  ylab("Ratio LDL/HDL") + xlab("∆T") + 
+  theme(legend.position="none")
+p
+#dev.off()
+
+#export just the cholesterol raw data for supplementary table
+pdata2_export <- pdata2 %>% dplyr::select(Participant_ID, Plate, HDL_Cholesterol_mg.dL, LDL_Cholesterol_mg.dL, Cholesterol_ratio)
+dim(pdata2_export)
+#write.csv(pdata2_export, "/ebio/abt3_projects2/uHEAT/data/SupplementalTables/S#_Cholesterol.csv")
+
+#test by diet for comparison
+wilcox.test(pdata2$Total_Cholesterol_mg.dL~pdata2$Diet2) #NS
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT2/data/cholesterol/Diet_totalCholesterol_plates1-10.pdf")
+p <- ggplot(pdata2, aes(x=Diet2, y=Total_Cholesterol_mg.dL)) + geom_boxplot() + geom_jitter(width=0.1, height=0) 
+p <- p + theme_bw()
+p <- p + annotate('segment', x=1, xend=2, y=2.5, yend=2.5)
+p <- p + annotate('text', label=c("NS"), x=1.5, y=2.6)
+p
+#dev.off()
+
+wilcox.test(pdata2$HDL_Cholesterol_mg.dL~pdata2$Diet2) #p=0.09
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT2/data/cholesterol/Diet_HDLCholesterol_plates1-10.pdf")
+p <- ggplot(pdata2, aes(x=Diet2, y=HDL_Cholesterol_mg.dL)) + geom_boxplot() + geom_jitter(width=0.1, height=0) 
+p <- p + theme_bw()
+p <- p + annotate('segment', x=1, xend=2, y=1, yend=1)
+p <- p + annotate('text', label=c("p=0.09"), x=1.5, y=1.1)
+p
+#dev.off()
+
+wilcox.test(pdata2$LDL_Cholesterol_mg.dL~pdata2$Diet2) #p=0.42
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT2/data/cholesterol/Diet_LDLCholesterol_plates1-10.pdf")
+p <- ggplot(pdata2, aes(x=Diet2, y=LDL_Cholesterol_mg.dL)) + geom_boxplot() + geom_jitter(width=0.1, height=0) 
+p <- p + theme_bw()
+p <- p + annotate('segment', x=1, xend=2, y=2, yend=2)
+p <- p + annotate('text', label=c("NS"), x=1.5, y=2.1)
+p
+#dev.off()
+
+wilcox.test(pdata2$Cholesterol_ratio~pdata2$Diet2) #p=0.005
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT2/data/cholesterol/Diet_CholesterolRatio_plates1-10.pdf")
+p <- ggplot(pdata2, aes(x=Diet2, y=Cholesterol_ratio)) + geom_boxplot() + geom_jitter(width=0.1, height=0)
+p <- p + theme_bw()
+p <- p + annotate('segment', x=1, xend=2, y=6, yend=6)
+p <- p + annotate('text', label=c("**"), x=1.5, y=6.2)
+p <- p + ylab("Ratio LDL/HDL")
+p
+#dev.off()
+
+
+```
+
+
+```{r import2 untargeted}
+
+#import metabolomics
+pos <- read.csv("/ebio/abt3_projects2/uHEAT2/data/metabolomics/MS019_pos_final_Nov2024.csv") #updated with higher confidence metabolites
+neg <- read.csv("/ebio/abt3_projects2/uHEAT2/data/metabolomics/MS019_neg_final_Nov2024.csv") #updated with higher confidence metabolites
+
+#per-person metadata, matching
+meta <- meta_seq %>% filter(!duplicated(Participant_ID)&!is.na(fever7d_aboveavg)) %>%
+  dplyr::select(-c(SampleID, Relative_Day, Time0, Time01))
+dim(meta)
+
+#retrieve annotations directly from the data file
+names(pos)
+dim(pos)
+annotations_pos <- pos[,c(1:32)]
+names(neg)
+dim(neg)
+annotations_neg <- neg[,c(1:32)]
+
+#extract the data itself, separately., as I had it before
+pos <- pos[,c(1:3, 33:length(names(pos)))]
+neg <- neg[,c(1:3, 33:length(names(neg)))]
+
+#make a unified annotation column - pick the first name if it is exists, otherwise the second
+annotations_pos[annotations_pos==""] <- NA
+annotations_pos$annotation <- ifelse(!is.na(annotations_pos$spectral_db_matches.compound_name),
+                                     yes=annotations_pos$spectral_db_matches.compound_name,
+                                     no=annotations_pos$name)
+#and then if both of those names are missing, use the class.
+annotations_pos$annotation <- ifelse(is.na(annotations_pos$annotation),
+                                     yes=annotations_pos$ClassyFire.most.specific.class,
+                                     no=annotations_pos$annotation)
+annotations_pos$annotation
+annotations_pos$id <- paste("Mp", annotations_pos$id, sep="_")
+#make a small version for merging
+ap <- annotations_pos %>% dplyr::select(id, rt, mz, annotation, molecularFormula, 
+                                 NPC.pathway, NPC.pathway.Probability, 
+                                 NPC.superclass, NPC.superclass.Probability)
+ap #and now it is clear that some of them are dups, so only do the annotation merging aftper Maaslin2.
+#make a non-numeric id for rownames and column names.
+
+
+#make a unified annotation column - pick the first name if it is exists, otherwise the second
+annotations_neg[annotations_neg==""] <- NA
+annotations_neg$annotation <- ifelse(!is.na(annotations_neg$spectral_db_matches.compound_name),
+                                     yes=annotations_neg$spectral_db_matches.compound_name,
+                                     no=annotations_neg$name)
+#and then if both of those names are missing, use the class.
+annotations_neg$annotation <- ifelse(is.na(annotations_neg$annotation),
+                                     yes=annotations_neg$ClassyFire.most.specific.class,
+                                     no=annotations_neg$annotation)
+annotations_neg$annotation
+annotations_neg$id <- paste("Mn", annotations_neg$id, sep="_")
+#make a small version for merging
+an <- annotations_neg %>% dplyr::select(id, rt, mz, annotation, molecularFormula, 
+                                 NPC.pathway, NPC.pathway.Probability, 
+                                 NPC.superclass, NPC.superclass.Probability)
+an #and now it is clear that some of them are dups, so only do the annotation merging after Maaslin2.
+#make a non-numeric id for rownames and column names.
+
+
+#cleaning it up cont. #weirdly in the new positive version there are 'duplicate ids'.
+row.names(pos) <- paste("Mp", pos$id, sep="_")
+ftp <- pos %>% dplyr::select(-c("id", "rt", "mz")) #start with positive ion mode - name based on Petras lab script
+ftp <- ftp[,order(colnames(ftp)), drop=F]
+
+row.names(neg) <- paste("Mn", neg$id, sep="_")
+ftn <- neg %>% dplyr::select(-c("id", "rt", "mz")) #start with positive ion mode - name based on Petras lab script
+ftn <- ftn[,order(colnames(ftn)), drop=F]
+
+#make a 'metabolomics' metadata file which contains all the sample info also for blanks and QCs
+#can I do this identically for the neg and pos ones? #technically not but the only diff is pos/neg.
+identical(names(ftp), names(ftn)) #OK still not identical even with pos/neg designation removed. just make two separate metadata files for now.
+mdp <- data.frame(Metabo_SampleID=c(names(ftp)))
+mdp$Participant_ID=sapply(strsplit(as.character(mdp$Metabo_SampleID),"_"), `[`, 2)
+mdp$Participant_ID <- gsub("H", "HEAT_", mdp$Participant_ID)
+mdp$Blood <- sapply(strsplit(as.character(mdp$Metabo_SampleID),"_"), `[`, 3)
+mdp$Blood <- ifelse(mdp$Participant_ID %in% c("Pos", "Neg"), yes=NA, no=mdp$Blood)
+mdp$Participant_ID <- ifelse(mdp$Participant_ID%in%c("Pos", "Neg"), yes=NA, no=mdp$Participant_ID)
+mdp$SampleType <- sapply(strsplit(as.character(mdp$Metabo_SampleID),"_"), `[`, 1)
+mdp$SampleType <- ifelse(mdp$SampleType %in% c("Blank", "QC", "Average", "NA_num"), yes=mdp$SampleType, no="Serum")
+#meta_small <- meta %>% dplyr::select(Participant_ID, fever7d_aboveavg) #start with just minimal metadata to keep things simple
+mdp <- mdp %>% full_join(meta) %>% filter(!is.na(SampleType)) #keep full metadata for all the samples
+head(mdp)
+row.names(mdp) <- mdp$Metabo_SampleID
+mdp <- mdp[order(row.names(mdp)),,drop=F]
+#did any samples still get run twice? I think it is fixed now.
+mdp$Metabo_SampleNo=sapply(strsplit(as.character(mdp$Metabo_SampleID),"_"), `[`, 1)
+mdp[which(duplicated(mdp$Metabo_SampleNo)),]$Metabo_SampleNo #yes, #71 and #97 are duplicated?
+mdp[which(duplicated(mdp$Metabo_SampleNo)),]$Metabo_SampleID
+dups <- mdp %>% filter(Metabo_SampleNo %in% c("71", "97"))
+ftp[,which(names(ftp) %in% dups$Metabo_SampleID)]
+#remove the duplicates from the ftp table according to Dennis' instructions on which one is a better intensity.
+mdp <- mdp %>% filter(!(Metabo_SampleID %in% c("71_H065_B2_Pos", "97_H107_B1_Pos")))
+mdp[which(duplicated(mdp$Metabo_SampleNo)),]$Metabo_SampleNo #Now it's clean.
+ftp <- ftp[,which(names(ftp)%in%mdp$Metabo_SampleID)]
+
+# how many files in the metadata are also present in the feature table
+table(rownames(mdp) %in% colnames(ftp))
+identical(rownames(mdp), colnames(ftp))
+#transpose the feature table and ensure numeric
+ftp_t <- as.data.frame(t(ftp)) #transposing the ftp
+ftp_t <- ftp_t %>% mutate_all(as.numeric)  #converting all values to numeric
+identical(rownames(mdp),rownames(ftp_t)) #should return TRUE now
+
+##repeat for negative mode.
+mdn <- data.frame(Metabo_SampleID=c(names(ftn)))
+mdn$Participant_ID=sapply(strsplit(as.character(mdn$Metabo_SampleID),"_"), `[`, 2)
+mdn$Participant_ID <- gsub("H", "HEAT_", mdn$Participant_ID)
+mdn$Blood <- sapply(strsplit(as.character(mdn$Metabo_SampleID),"_"), `[`, 3)
+mdn$Blood <- ifelse(mdn$Participant_ID %in% c("Pos", "Neg"), yes=NA, no=mdn$Blood)
+mdn$Participant_ID <- ifelse(mdn$Participant_ID%in%c("Pos", "Neg"), yes=NA, no=mdn$Participant_ID)
+mdn$SampleType <- sapply(strsplit(as.character(mdn$Metabo_SampleID),"_"), `[`, 1)
+mdn$SampleType <- ifelse(mdn$SampleType %in% c("Blank", "QC", "Average", "NA_num"), yes=mdn$SampleType, no="Serum")
+#meta_small <- meta %>% dplyr::select(Participant_ID, fever7d_aboveavg) #start with just minimal metadata to keep things simple
+mdn <- mdn %>% full_join(meta) %>% filter(!is.na(SampleType)) #keep full metadata for all the samples
+head(mdn)
+row.names(mdn) <- mdn$Metabo_SampleID
+mdn <- mdn[order(row.names(mdn)),,drop=F]
+#did any samples still get run twice? I think it is fixed now.
+mdn$Metabo_SampleNo=sapply(strsplit(as.character(mdn$Metabo_SampleID),"_"), `[`, 1)
+mdn[which(duplicated(mdn$Metabo_SampleNo)),]$Metabo_SampleNo #yes, #149 and 93 and 95 dups #no only blanks and QCs
+mdn[which(duplicated(mdn$Metabo_SampleNo)),]$Metabo_SampleID #yes, #149 and 93 and 95 dups
+dups <- mdn %>% filter(Metabo_SampleNo %in% c("93", "95", "149"))
+ftn[,which(names(ftn) %in% dups$Metabo_SampleID)]
+#remove the duplicates from the ftp table according to Dennis' instructions on which one is a better intensity.
+#later noticed 2 additional technical duplicates, filtered based on which one had fewer NA
+length(ftn$X114_H051_B1_Neg[is.na(ftn$X114_H051_B1_Neg)])
+length(ftn$X167_H051_B1_Neg_1[is.na(ftn$X167_H051_B1_Neg_1)]) #has less NA
+length(ftn$X154_H104_B1_Neg_1[is.na(ftn$X154_H104_B1_Neg_1)])
+length(ftn$X86_H104_B1_Neg_2[is.na(ftn$X86_H104_B1_Neg_2)]) #very similar, has slightly less NA
+mdn <- mdn %>% filter(!(Metabo_SampleID %in% c("149_H038_B2_Neg_1", "93_H154_B1_Neg_1", "93_H154_B1_Neg_2", "95_H155_B1_Neg_1",
+                                               "X114_H051_B1_Neg", "X154_H104_B1_Neg_1")))
+mdn[which(duplicated(mdn$Metabo_SampleNo)),]$Metabo_SampleNo #now it's clean.
+ftn <- ftn[,which(names(ftn)%in%mdn$Metabo_SampleID)]
+
+# how many files in the metadata are also present in the feature table
+table(rownames(mdn) %in% colnames(ftn))
+identical(rownames(mdn), colnames(ftn))
+#transpose the feature table and ensure numeric
+ftn_t <- as.data.frame(t(ftn)) #transposing the ftn
+ftn_t <- ftn_t %>% mutate_all(as.numeric)  #converting all values to numeric
+identical(rownames(mdn),rownames(ftn_t)) #should return TRUE now
+
+```
+
+```{r plot volcano no covariates}
+#instead of the tile plot, a more informative volcano plot.
+#take ALL hits, plus annotations
+
+pos_fever <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/MetaboPos_Maaslin2_Fever7d.csv", row.names=1)
+neg_fever <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/Rscripts_server/maaslin2_output/MetaboNeg_Maaslin2_Fever7d.csv", row.names=1)
+
+#retrieve annotations
+pos_fever_an <- pos_fever %>% 
+  rename(id=feature) %>%
+  full_join(ap) %>% #positive annotations
+  filter(metadata=="fever7d_aboveavg") 
+pos_fever_an #entirely un-annotated
+pos_fever_an[is.na(pos_fever_an)] <- c("None")
+
+neg_fever_an <- neg_fever %>% 
+  rename(id=feature) %>%
+  full_join(an) %>% #negative annotations
+  filter(metadata=="fever7d_aboveavg") 
+neg_fever_an #almost entirely un-annotated
+neg_fever_an[is.na(neg_fever_an)] <- c("None")
+
+identical(names(pos_fever_an), names(neg_fever_an))
+vdata <- rbind(pos_fever_an, neg_fever_an)
+
+mycolours <- c("deepskyblue4", "deepskyblue3", "firebrick4", "firebrick2", "grey")
+names(mycolours) <- c("DOWN q<0.05", "DOWN q<0.1", "UP q<0.05", "UP q<0.1",  "NO")
+vdata$diffexpressed <- c("NO")
+vdata$diffexpressed[vdata$coef > 0 & vdata$qval<0.1] <- c("UP q<0.1")
+vdata$diffexpressed[vdata$coef > 0 & vdata$qval<0.05] <- c("UP q<0.05")
+vdata$diffexpressed[vdata$coef < 0 & vdata$qval<0.1] <- c("DOWN q<0.1")
+vdata$diffexpressed[vdata$coef < 0 & vdata$qval<0.05] <- c("DOWN q<0.05")
+
+# Create a new column "delabel" to de, that will contain the name of genes differentially expressed 
+vdata$delabel <- ifelse(vdata$diffexpressed!="NO"&vdata$annotation!="None",
+                          yes=vdata$annotation, no=NA)
+
+#add a manual annotation from Dai Long
+man_an <- read.csv("/ebio/abt3_projects2/uHEAT2/data/metabolomics/manual_annotations.csv")
+vdata <- vdata %>% full_join(man_an)
+vdata$delabel <-  ifelse(vdata$diffexpressed!="NO"&vdata$annotation=="None",
+                          yes=vdata$Annotation, no=vdata$delabel)
+
+
+#pdf(width=5, height=3.5, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/2B.MetaboVolcanoSexAgeFever_ManAnn.pdf")
+p = ggplot(data=vdata, aes(x=coef, y=-log10(pval), 
+                              col=diffexpressed, 
+                              label=delabel)) + 
+  ggtitle("Serum Metabolomics") +
+  scale_colour_manual(values = mycolours) + 
+  geom_point(size=0.3) + 
+  theme_bw() +
+  guides(fill = guide_legend(override.aes = aes(label = ""))) + 
+  geom_text_repel(size=2,  max.overlaps = 30, segment.size=0.2, show.legend = FALSE)
+#    geom_text(size=2)
+p
+#dev.off()
+
+#double check annotations for significant hits
+hits <- vdata %>% filter(qval<0.1) %>% as.data.frame() #no
+annotations_pos %>% filter(id %in% hits$id)
+annotations_neg %>% filter(id %in% hits$id)
+#indeed no more data is available
+#export the hits for manual annotation via HMDB
+#write.csv(hits, "/ebio/abt3_projects2/uHEAT/code/R_code/Rscripts_server/maaslin2_output/Metabo_Maaslin2_SexAgeFever7d_hitsforannotatio#n2.csv")
+
+#list all significant hits to check annotations / labels
+h1 <- vdata %>% filter(qval<0.1) %>% dplyr::select(id, delabel, rt, mz, pval, qval, coef, diffexpressed) %>%
+  rename(annotation=delabel)
+#h1$Covariates <- c("None") #because there are no hits so the df is empty
+h1
+
+```
+
+
+```{r plot volcano sex age}
+#instead of the tile plot, a more informative volcano plot.
+#take ALL hits, plus annotations
+
+neg_fever <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/MetaboNeg_Maaslin2_SexAgeFever7d.csv", row.names=1)
+pos_fever <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/MetaboPos_Maaslin2_SexAgeFever7d.csv", row.names=1)
+
+#retrieve annotations
+pos_fever_an <- pos_fever %>% 
+  rename(id=feature) %>%
+  full_join(ap) %>% #positive annotations
+  filter(metadata=="fever7d_aboveavg") 
+pos_fever_an #entirely un-annotated
+pos_fever_an[is.na(pos_fever_an)] <- c("None")
+
+neg_fever_an <- neg_fever %>% 
+  rename(id=feature) %>%
+  full_join(an) %>% #negative annotations
+  filter(metadata=="fever7d_aboveavg") 
+neg_fever_an #almost entirely un-annotated
+neg_fever_an[is.na(neg_fever_an)] <- c("None")
+
+identical(names(pos_fever_an), names(neg_fever_an))
+vdata <- rbind(pos_fever_an, neg_fever_an)
+
+mycolours <- c("deepskyblue4", "deepskyblue3", "firebrick4", "firebrick2", "grey")
+names(mycolours) <- c("DOWN q<0.05", "DOWN q<0.1", "UP q<0.05", "UP q<0.1",  "NO")
+vdata$diffexpressed <- c("NO")
+vdata$diffexpressed[vdata$coef > 0 & vdata$qval<0.1] <- c("UP q<0.1")
+vdata$diffexpressed[vdata$coef > 0 & vdata$qval<0.05] <- c("UP q<0.05")
+vdata$diffexpressed[vdata$coef < 0 & vdata$qval<0.1] <- c("DOWN q<0.1")
+vdata$diffexpressed[vdata$coef < 0 & vdata$qval<0.05] <- c("DOWN q<0.05")
+
+# Create a new column "delabel" to de, that will contain the name of genes differentially expressed 
+vdata$delabel <- ifelse(vdata$diffexpressed!="NO"&vdata$annotation!="None",
+                          yes=vdata$annotation, no=NA)
+
+#add a manual annotation from Dai Long
+man_an <- read.csv("/ebio/abt3_projects2/uHEAT2/data/metabolomics/manual_annotations.csv")
+vdata <- vdata %>% full_join(man_an)
+vdata$delabel <-  ifelse(vdata$diffexpressed!="NO"&vdata$annotation=="None",
+                          yes=vdata$Annotation, no=vdata$delabel)
+
+
+#pdf(width=5, height=3.5, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/2B.MetaboVolcanoSexAgeFever_ManAnn.pdf")
+p = ggplot(data=vdata, aes(x=coef, y=-log10(pval), 
+                              col=diffexpressed, 
+                              label=delabel)) + 
+  ggtitle("Serum Metabolomics") +
+  scale_colour_manual(values = mycolours) + 
+  geom_point(size=0.3) + 
+  theme_bw() +
+  guides(fill = guide_legend(override.aes = aes(label = ""))) + 
+  geom_text_repel(size=2,  max.overlaps = 30, segment.size=0.2, show.legend = FALSE)
+#    geom_text(size=2)
+p
+#dev.off()
+
+#double check annotations for significant hits
+hits <- vdata %>% filter(qval<0.1) %>% as.data.frame() #no
+annotations_pos %>% filter(id %in% hits$id)
+annotations_neg %>% filter(id %in% hits$id)
+#indeed no more data is available
+#export the hits for manual annotation via HMDB
+#write.csv(hits, "/ebio/abt3_projects2/uHEAT/code/R_code/Rscripts_server/maaslin2_output/Metabo_Maaslin2_SexAgeFever7d_hitsforannotatio#n2.csv")
+
+h2 <- vdata %>% filter(qval<0.1) %>% dplyr::select(id, delabel, rt, mz, pval, qval, coef, diffexpressed) %>%
+  rename(annotation=delabel)
+h2$Covariates <- c("SexAge")
+h2
+
+```
+
+
+```{r plot volcano sex age diet}
+#instead of the tile plot, a more informative volcano plot.
+#take ALL hits, plus annotations
+
+#import the maaslin model results if they have been run somewhere else
+neg_fever_corr <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/MetaboNeg_Maaslin2_SexAgeDiet3Fever7d.csv", row.names=1)
+pos_fever_corr <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/MetaboPos_Maaslin2_SexAgeDiet3Fever7d.csv", row.names=1)
+
+#retrieve annotations
+pos_fever_an <- pos_fever_corr %>% 
+  rename(id=feature) %>%
+  full_join(ap) %>% #positive annotations
+  filter(metadata=="fever7d_aboveavg") #take a few borderline to display
+pos_fever_an #entirely un-annotated
+pos_fever_an[is.na(pos_fever_an)] <- c("None")
+
+neg_fever_an <- neg_fever_corr %>% 
+  rename(id=feature) %>%
+  full_join(an) %>% #negative annotations
+  filter(metadata=="fever7d_aboveavg") #take a few borderline to display
+neg_fever_an #almost entirely un-annotated
+neg_fever_an[is.na(neg_fever_an)] <- c("None")
+
+identical(names(pos_fever_an), names(neg_fever_an))
+vdata <- rbind(pos_fever_an, neg_fever_an)
+
+mycolours <- c("deepskyblue4", "deepskyblue3", "firebrick4", "firebrick2", "grey")
+names(mycolours) <- c("DOWN q<0.05", "DOWN q<0.1", "UP q<0.05", "UP q<0.1",  "NO")
+vdata$diffexpressed <- c("NO")
+vdata$diffexpressed[vdata$coef > 0 & vdata$qval<0.1] <- c("UP q<0.1")
+vdata$diffexpressed[vdata$coef > 0 & vdata$qval<0.05] <- c("UP q<0.05")
+vdata$diffexpressed[vdata$coef < 0 & vdata$qval<0.1] <- c("DOWN q<0.1")
+vdata$diffexpressed[vdata$coef < 0 & vdata$qval<0.05] <- c("DOWN q<0.05")
+
+# Create a new column "delabel" to de, that will contain the name of genes differentially expressed 
+vdata$delabel <- ifelse(vdata$diffexpressed!="NO"&vdata$annotation!="None",
+                          yes=vdata$annotation, no=NA)
+
+#add a manual annotation from Dai Long
+man_an <- read.csv("/ebio/abt3_projects2/uHEAT2/data/metabolomics/manual_annotations.csv")
+vdata <- vdata %>% full_join(man_an)
+vdata$delabel <-  ifelse(vdata$diffexpressed!="NO"&vdata$annotation=="None",
+                          yes=vdata$Annotation, no=vdata$delabel)
+
+#are there any significant labelled ones? 
+vdata %>% filter(qval<0.05) %>% as.data.frame() #no
+
+#pdf(width=6, height=5, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/2B.MetaboFeverVolcano.pdf")
+p = ggplot(data=vdata, aes(x=coef, y=-log10(pval), 
+                              col=diffexpressed, 
+                              label=delabel)) + 
+  ggtitle("Serum Metabolomics: Fever Hi vs Lo") +
+  scale_colour_manual(values = mycolours) + 
+  geom_point(size=0.3) + 
+  theme_bw() +
+  guides(fill = guide_legend(override.aes = aes(label = ""))) + 
+  geom_text_repel(size=2,  max.overlaps = 30, segment.size=0.2, show.legend = FALSE)
+#    geom_text(size=2)
+p
+#dev.off()
+
+h3 <- vdata %>% filter(qval<0.1) %>% dplyr::select(id, delabel, rt, mz, pval, qval, coef, diffexpressed) %>%
+  rename(annotation=delabel)
+h3$Covariates <- c("SexAgeDiet")
+h3
+
+identical(names(h2), names(h3))
+
+metabo_hits_to_export <- rbind(h2, h3)
+#write.csv(metabo_hits_to_export, "/ebio/abt3_projects2/uHEAT/data/SupplementalTables/S#_metabolomic_stats.csv")
+
+```
+
+
+```{r plot}
+#plot the combined neg and pos results 
+
+#import the maaslin model results if they have been run somewhere else
+neg_fever_corr <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/Rscripts_server/maaslin2_output/MetaboNeg_Maaslin2_SexAgeDietBMIFever7d.csv", row.names=1)
+pos_fever_corr <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/Rscripts_server/maaslin2_output/MetaboPos_Maaslin2_SexAgeDietBMIFever7d.csv", row.names=1)
+
+##neg clean metadata
+mdn_clean <- mdn %>% filter(mdn$Metabo_SampleID %in% row.names(blk_rem_n)
+                            &Blood=="B1") #baseline samples only!
+blk_rem_n <- blk_rem_n[which(row.names(blk_rem_n)%in%row.names(mdn_clean)),]
+identical(row.names(mdn_clean), row.names(blk_rem_n))
+blk_rem_nt <- as.data.frame(t(blk_rem_n))
+identical(row.names(mdn_clean), names(blk_rem_nt))
+row.names(blk_rem_nt) #and the metabolite ids are still retained.
+
+mdn_clean$fever7d_aboveavg <- factor(mdn_clean$fever7d_aboveavg, levels=c("lo", "hi"))
+
+#retrieve annotations
+pos_fever_an <- pos_fever_corr %>% 
+  rename(id=feature) %>%
+  full_join(ap) %>% #positive annotations
+  filter(qval<0.1&metadata=="fever7d_aboveavg") #take a few borderline to display
+pos_fever_an #entirely un-annotated
+pos_fever_an[is.na(pos_fever_an)] <- c("None")
+
+neg_fever_an <- neg_fever_corr %>% 
+  rename(id=feature) %>%
+  full_join(an) %>% #negative annotations
+  filter(qval<0.1&metadata=="fever7d_aboveavg") #take a few borderline to display
+neg_fever_an #almost entirely un-annotated
+neg_fever_an[is.na(neg_fever_an)] <- c("None")
+
+#plot 
+fever_res <- full_join(pos_fever_an, neg_fever_an)
+pdata <- fever_res %>% filter(!is.na(annotation))
+pdata
+#check for duplicate annotations per id
+dups <- pdata %>% filter(annotation!="None")
+duplicated(dups$id) #no
+#how many total hits pass qval 0.05?
+pdata %>% filter(qval<0.05) %>% count(id) %>% count(n)
+#write this out as a supplemental table.
+#write.csv(pdata, "/ebio/abt3_projects2/uHEAT/data/SupplementalTables/TableS#_MetabolomicHits_AgeSexBMIFever.csv")
+#for plotting
+pdata$id_annotation <- paste(pdata$id, pdata$annotation, sep="_")
+pdata$id <- gsub("Mn", "Neg_", pdata$id)
+pdata$id <- gsub("Mp", "Pos_", pdata$id)
+pdata$id <- factor(pdata$id,                                   
+                       levels = pdata$id[order(pdata$coef, decreasing = FALSE)])
+pdata$id_annotation <- factor(pdata$id_annotation,                                   
+                       levels = pdata$id_annotation[order(pdata$coef, decreasing = FALSE)])
+
+#make a summary plot with only the annotated ones, analogous to somalogic tile plot
+hits_heatmap <- fever_res %>% filter(annotation!="None")
+#get raw data for the hits #there are only annotations for neg metabolites
+metabo_data_heatmap_pos <- blk_rem_p[,which(names(blk_rem_p) %in% hits_heatmap$id)]
+metabo_data_heatmap_neg <- blk_rem_n[,which(names(blk_rem_n) %in% hits_heatmap$id)]
+metabo_data_heatmap <- metabo_data_heatmap_neg
+#mdn_clean <- mdn_clean[order(mdn_clean$Metabo_SampleID),]
+#metabo_data_heatmap <- metabo_data_heatmap[order(row.names(metabo_data_heatmap)),]
+identical(row.names(metabo_data_heatmap), mdn_clean$Metabo_SampleID)
+metabo_data_heatmap <- data.frame(metabo_data_heatmap, mdn_clean)
+
+#how many annotated hits
+n <- hits_heatmap %>% count(id) %>% count(n)
+n$nn
+
+metabo_data_heatmap2 <- metabo_data_heatmap %>% 
+  pivot_longer(cols=c(1:n$nn), names_to="id", values_to="Abundance")
+metabo_data_heatmap2 <- metabo_data_heatmap2 %>% 
+  filter(!is.na(fever7d_aboveavg)) %>%
+  group_by(fever7d_aboveavg, id) %>%
+  summarize(Abund=mean(Abundance)) %>% 
+  as.data.frame()
+metabo_data_heatmap2[order(metabo_data_heatmap2$id),]
+
+#re-obtain information about the hits and use it to make a plot
+metabo_data_heatmap3 <- metabo_data_heatmap2 %>% 
+  full_join(hits_heatmap) 
+
+#normalize the Abund row-wise and make aesthetic changes
+pdata1 <- metabo_data_heatmap3 %>% group_by(id) %>% mutate(Abund_norm=Abund/sum(Abund))
+pdata1$fever7d_aboveavg <- factor(pdata1$fever7d_aboveavg, levels=c("lo", "hi"))
+pdata1$annotation_id <- paste(gsub("Mn_", "M", pdata1$id), 
+                             pdata1$annotation, sep="_")
+pdata1$annotation_id <- gsub(" ", "_", pdata1$annotation_id)
+pdata1$annotation_id <- factor(pdata1$annotation_id, levels=pdata1$annotation_id[order(pdata1[which(pdata1$fever7d_aboveavg=="hi"),]$Abund_norm,
+                                                                      decreasing = FALSE)])
+
+pdata1$significance <- ifelse(pdata1$fever7d_aboveavg=="hi"&pdata1$coef>0&pdata1$qval<0.05, 
+                             yes="*", no=NA)
+pdata1$significance <- ifelse(pdata1$fever7d_aboveavg=="lo"&pdata1$coef<0&pdata1$qval<0.05, 
+                             yes="*", no=pdata1$significance)
+
+#pdf(width=4.5, height=2, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/2A.MetaboliteHits.pdf")
+p <- ggplot(pdata1, aes(x=fever7d_aboveavg, y=annotation_id, fill=Abund_norm)) + geom_tile(colour="white")
+p <- p + scale_fill_gradient(low="aliceblue", high="deepskyblue3")
+p <- p + geom_text(aes(label = significance), size = 4)
+p <- p + xlab("Fever") + ylab(NULL) + labs(fill='Scaled Abundance')
+p
+#dev.off()
+
+```
+
+
+```{r plot tile}
+##Plus: a complementary tile plot; total TG categories, cholesterol, BMI, etc.
+#metadata factors
+pdata1 <- mdn_clean %>% filter(!is.na(fever7d_aboveavg)) %>%
+  group_by(fever7d_aboveavg) %>%
+  summarize(BMI_kg_m2=mean(BMI_kg_m2,na.rm=TRUE),
+            Waist_circumference_cm=mean(Waist_circumference_cm, na.rm=TRUE),
+            Blood_pressure_mmHg_systolic=mean(Blood_pressure_mmHg_systolic, na.rm=TRUE),
+            Blood_pressure_mmHg_diastolic=mean(Blood_pressure_mmHg_diastolic,na.rm=TRUE),
+            Heart_rate_bpm=mean(Heart_rate_bpm, na.rm=TRUE))
+pdata1
+#tg factors
+pdata2 <- tg_sum_meta %>% filter(!is.na(fever7d_aboveavg)) %>%
+  group_by(fever7d_aboveavg) %>%
+  summarize(Cholesterol_esters=mean(CE),
+            Triglycerides=mean(TG), 
+            `1,2-Diacylglycerides`=mean(`1,2-DG`),
+            `1,3-Diacylglycerides`=mean(`1,3-DG`)
+            )
+pdata2
+#cholesterol
+pdata3 <- cholesterol_meta %>% filter(!is.na(fever7d_aboveavg)) %>%
+  group_by(fever7d_aboveavg) %>%
+  summarize(LDL_Cholesterol_mg.dL=mean(LDL_Cholesterol_mg.dL),
+            HDL_Cholesterol_mg.dL=mean(HDL_Cholesterol_mg.dL))
+pdata3
+
+pdata4 <- Reduce(full_join, list(pdata1, pdata2,pdata3))
+pdata4$fever7d_aboveavg <- factor(pdata4$fever7d_aboveavg, levels=c("lo", "hi"))
+pdata5 <- pdata4 %>% pivot_longer(cols=c(2:length(names(pdata4))),
+                                  names_to="Marker",
+                                  values_to="Value")
+#scale by row
+pdata5 <- pdata5 %>% group_by(Marker) %>% mutate(Value_norm=Value/sum(Value))
+#add category
+pdata5$Category <- ifelse(pdata5$Marker %in% names(pdata1),
+                          yes="1.Clinical", no="3.Metabolite")
+
+#aesthetically add a break
+# Step 1: Create a break row in your data
+break_row <- data.frame(
+  fever7d_aboveavg = unique(pdata5$fever7d_aboveavg)[1], # Use one of the existing x-values
+  Marker = " ",  # This will act as the gap
+  Value= NA,
+  Value_norm = NA,  # No value for the gap
+  Category = "2.Break"
+)
+
+# Step 2: Bind the break row to your original data
+pdata5_with_break <- rbind(pdata5, break_row)
+
+# Step 3: Ensure the Marker factor is ordered correctly, including the break
+pdata5_with_break$Marker <- factor(pdata5_with_break$Marker, levels = unique(pdata5_with_break[order(pdata5_with_break$Category, decreasing=TRUE),]$Marker))
+
+
+pdf(width=4, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/2A.MetaboliteMarkerPanel.pdf")
+p <- ggplot(pdata5_with_break, aes(x=fever7d_aboveavg, y=Marker, fill=Value_norm)) + geom_tile(colour="white")
+p <- p + scale_fill_gradient(low="aliceblue", high="deepskyblue3", na.value=NA)
+p <- p + xlab("Fever") + ylab(NULL) + labs(fill='Scaled Value')
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "white"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p
+dev.off()
+
+```
+

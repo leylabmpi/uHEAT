@@ -1,0 +1,2256 @@
+---
+title: "02.MEDI"
+author: "Kelsey Huus"
+date: "2024-07-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+##Packages
+library(dplyr)
+library(ggplot2)
+#library(data.table)
+library(tidyr)
+```
+
+```{r import medi files}
+#updated: this version also excludes SERIES 2 of all double series.
+meta_seq <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/meta_seq_clean_series1.24.08.18.csv", 
+                     row.names=1)
+
+#define DIET 3
+meta_seq$Diet3 <- ifelse(meta_seq$Diet %in% c("Vegan", "Vegetarian"), yes="Veg", no="Omni")
+meta_seq$Diet3 <- factor(meta_seq$Diet3, levels=c("Veg", "Omni"))
+
+#per-person metadata, matching
+meta <- meta_seq %>% filter(!duplicated(Participant_ID)&!is.na(fever7d_aboveavg)) %>%
+  dplyr::select(-c(SampleID, Relative_Day, Time0, Time01))
+length(meta$Participant_ID) #final number of participants
+
+medi_content1 <- read.csv("/ebio/abt3_projects2/uHEAT/code/medi_atyakht_test/medi/data_batch1/food_content.csv")
+medi_abund1 <- read.csv("/ebio/abt3_projects2/uHEAT/code/medi_atyakht_test/medi/data_batch1/food_abundance.csv")
+
+medi_content2 <- read.csv("/ebio/abt3_projects2/uHEAT/code/medi_atyakht_test/medi/data_batch2/food_content.csv")
+medi_abund2 <- read.csv("/ebio/abt3_projects2/uHEAT/code/medi_atyakht_test/medi/data_batch2/food_abundance.csv")
+
+medi_content3 <- read.csv("/ebio/abt3_projects2/uHEAT/code/medi_atyakht_test/medi/data_batch3/food_content.csv")
+medi_abund3 <- read.csv("/ebio/abt3_projects2/uHEAT/code/medi_atyakht_test/medi/data_batch3/food_abundance.csv")
+
+medi_content4 <- read.csv("/ebio/abt3_projects2/uHEAT/code/medi_atyakht_test/medi/data_batch4/food_content.csv")
+medi_abund4 <- read.csv("/ebio/abt3_projects2/uHEAT/code/medi_atyakht_test/medi/data_batch4/food_abundance.csv")
+
+head(medi_content4)
+head(medi_abund4)
+
+identical(names(medi_content3), names(medi_content4))
+identical(names(medi_abund3), names(medi_abund4))
+medi_content <- rbind(medi_content1, medi_content2, medi_content3, medi_content4)
+medi_abund <- rbind(medi_abund1, medi_abund2, medi_abund3, medi_abund4)
+
+medi_abund_meta <- medi_abund %>% 
+  dplyr::rename(SampleID=sample_id) %>%
+  full_join(meta_seq)
+
+medi_content$Participant_ID=sapply(strsplit(medi_content$sample_id,"_"), `[`, 1)
+medi_content$Participant_ID <- gsub("H", "HEAT_", medi_content$Participant_ID)
+
+#checking duplicated foods - duplication occurs via unit (e.g. mg/100g and IU both reported)
+dups <- medi_content %>% group_by(sample_id) %>% filter(duplicated(name))
+medi_content %>% filter(name %in% dups$name) %>% dplyr::select(sample_id, compound_id,unit, name, abundance)
+medi_content_nodups <- medi_content %>% group_by(sample_id) %>% filter(!duplicated(name))
+
+#first: summarize by food category by PERSON
+medi_abund$Participant_ID=sapply(strsplit(medi_abund$sample_id,"_"), `[`, 1)
+medi_abund$Participant_ID <- gsub("H", "HEAT_", medi_abund$Participant_ID)
+
+identical(names(medi_content3), names(medi_content4))
+identical(names(medi_abund3), names(medi_abund4))
+medi_content <- rbind(medi_content1, medi_content2, medi_content3, medi_content4)
+medi_abund <- rbind(medi_abund1, medi_abund2, medi_abund3, medi_abund4)
+
+medi_abund_meta <- medi_abund %>% 
+  dplyr::rename(SampleID=sample_id) %>%
+  full_join(meta_seq)
+
+medi_content$Participant_ID=sapply(strsplit(medi_content$sample_id,"_"), `[`, 1)
+medi_content$Participant_ID <- gsub("H", "HEAT_", medi_content$Participant_ID)
+
+#checking duplicated foods - duplication occurs via unit (e.g. mg/100g and IU both reported)
+dups <- medi_content %>% group_by(sample_id) %>% filter(duplicated(name))
+medi_content %>% filter(name %in% dups$name) %>% dplyr::select(sample_id, compound_id,unit, name, abundance)
+medi_content_nodups <- medi_content %>% group_by(sample_id) %>% filter(!duplicated(name))
+
+#first: summarize by food category by PERSON
+medi_abund$Participant_ID=sapply(strsplit(medi_abund$sample_id,"_"), `[`, 1)
+medi_abund$Participant_ID <- gsub("H", "HEAT_", medi_abund$Participant_ID)
+
+medi_content$Participant_ID=sapply(strsplit(medi_content$sample_id,"_"), `[`, 1)
+medi_content$Participant_ID <- gsub("H", "HEAT_", medi_content$Participant_ID)
+
+```
+
+```{r additional grouping}
+#WARNING: in some environments (??) this will break
+medi_content_wide_abs <- medi_content_nodups %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(name!="") %>% #filtering only for units mg/100g gets rid of too much
+  #filter(sample_id %in% meta_seq$SampleID) %>% #keep only the clean samples - but because MEDI is sparse this is too strict
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  dplyr::select(Participant_ID, name, abundance)  %>%
+  group_by(Participant_ID, name) %>%
+  dplyr::summarize(abundance=mean(abundance)) %>%
+  pivot_wider(names_from=name, values_from=abundance) #absolute abundance
+medi_content_wide_abs
+
+#WARNING: in some environments (??) this will break
+medi_content_wide_class <- medi_content_nodups %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(class!="") %>% #filtering only for units mg/100g gets rid of too much
+  #filter(sample_id %in% meta_seq$SampleID) %>% #keep only the clean samples - but because MEDI is sparse this is too strict
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  dplyr::select(Participant_ID, class, abundance)  %>%
+  group_by(Participant_ID, class) %>%
+  dplyr::summarize(abundance=mean(abundance)) %>%
+  pivot_wider(names_from=class, values_from=abundance) #absolute abundance
+medi_content_wide_class
+
+medi_content_wide_rel <- medi_content_nodups %>%
+  ungroup() %>%
+  filter(name!="") %>%
+  #filter(sample_id %in% meta_seq$SampleID) %>% #keep only the clean samples - but because MEDI is sparse this is too strict
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  dplyr::select(Participant_ID, name, relative_abundance)  %>%
+  group_by(Participant_ID, name) %>%
+  dplyr::summarize(relative_abundance=mean(relative_abundance)) %>%
+  pivot_wider(names_from=name, values_from=relative_abundance) #relative abundance
+medi_content_wide_rel
+
+medi_content_meta_abs <- full_join(medi_content_wide_abs, meta_seq) %>% filter(!is.na(Fat)&!duplicated(Participant_ID))
+medi_content_meta_rel <- full_join(medi_content_wide_rel, meta_seq) %>% filter(!is.na(Fat)&!duplicated(Participant_ID))
+
+#make sure to clean up redundant annotations before summing by category
+medi_abund_group <- medi_abund %>%
+  filter(sample_id %in% meta_seq$SampleID) %>% #keep only the clean samples
+  group_by(Participant_ID, sample_id, food_group) %>%
+  dplyr::summarize(relative_abundance=sum(relative_abundance)) %>% #first sum the categories by sample
+  group_by(Participant_ID, food_group) %>%
+  dplyr::summarize(relative_abundance=mean(relative_abundance)) #then average by person over time
+medi_abund_group
+
+medi_abund_genus <- medi_abund %>% 
+  filter(sample_id %in% meta_seq$SampleID) %>% #keep only the clean samples
+  group_by(Participant_ID, sample_id, genus) %>%
+  dplyr::summarize(relative_abundance=sum(relative_abundance)) %>% #first sum the categories by sample
+  group_by(Participant_ID, genus) %>%
+  dplyr::summarize(relative_abundance=mean(relative_abundance)) #then average by person over time
+medi_abund_genus
+
+
+```
+
+```{r food diversity}
+#the most basic kind of diversity: number of unique foods/food groups detected per person
+medi_abund_div <- medi_abund %>% group_by(sample_id) %>% filter(!duplicated(food_id))
+#what are the missing species?
+#medi_abund_div %>% filter(species=="") %>% View()
+medi_abund_div$species <- ifelse(medi_abund_div$species=="", yes=medi_abund_div$genus, no=medi_abund_div$species)
+#medi_abund_div %>% filter(species=="") %>% View()
+medi_abund_div <- medi_abund_div %>% filter(reads!=0) #why the empty rows!
+
+foods_per_person_plants <- medi_abund_div %>% ungroup() %>% 
+  filter(phylum %in% c("Streptophyta", "Basidiomycota")) %>% #only plants and fungi
+  #filter(sample_id %in% meta_seq$SampleID) %>% #keep only the clean samples - but because MEDI is sparse this is too strict
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  group_by(Participant_ID) %>% dplyr::count(species) #number of different species / food ids consumed
+foods_per_person_plants #now there are no missing species. And all the species are plants.
+foods_per_person_plants <- as.data.frame(foods_per_person_plants) %>% count(Participant_ID) #how many unique entries per person
+foods_per_person_plants 
+
+#normalize this to the number of samples per person
+samples_per_person <- medi_abund %>% filter(!duplicated(sample_id)) %>% count(Participant_ID) %>% as.data.frame()
+samples_per_person 
+
+#normalize
+foods_per_person_plants_norm <- foods_per_person_plants %>%
+  rename(nplants=n) %>%
+  full_join(samples_per_person) %>%
+  filter(Participant_ID %in% meta_seq$Participant_ID)
+foods_per_person_plants_norm$nplants <- ifelse(is.na(foods_per_person_plants_norm$nplants), 0, foods_per_person_plants_norm$nplants)
+foods_per_person_plants_norm$nplants_norm <- foods_per_person_plants_norm$nplants / foods_per_person_plants_norm$n #avg number unique plant foods per sample
+foods_per_person_plants_norm
+
+foods_per_person_plants_meta <- foods_per_person_plants_norm %>% 
+  full_join(meta) %>%
+  filter(!is.na(nplants_norm))
+foods_per_person_plants_meta %>% dplyr::select(Participant_ID, nplants_norm, Diet2, Diet3)
+
+wilcox.test(foods_per_person_plants_meta$nplants~foods_per_person_plants_meta$Diet2) #p=0.045 #p=0.15 #p=0.056 w all samples
+wilcox.test(foods_per_person_plants_meta$nplants_norm~foods_per_person_plants_meta$Diet2) #p=0.046 #p=0.14 #p=0.084 w all samples
+
+wilcox.test(foods_per_person_plants_meta$nplants~foods_per_person_plants_meta$Diet3) #p=0.088 w all samples
+wilcox.test(foods_per_person_plants_meta$nplants_norm~foods_per_person_plants_meta$Diet3) #p=0.15 w all samples
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2A.UniquePlantFoods.Diet.pdf")
+p <- ggplot(foods_per_person_plants_meta, aes(x=Diet2, y=nplants)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  ylab("# Unique Plant Foods") + xlab("Diet") +
+  annotate('segment', x=1, xend=2, y=34, yend=34) + 
+  annotate('text', x=1.5, y=35, label="p=0.08")
+p
+#dev.off()
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2A.UniquePlantFoods.Diet3.pdf")
+p <- ggplot(foods_per_person_plants_meta, aes(x=Diet3, y=nplants)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  ylab("# Unique Plant Foods") + xlab("Diet") +
+  annotate('segment', x=1, xend=2, y=34, yend=34) + 
+  annotate('text', x=1.5, y=35, label="p=0.14")
+p
+#dev.off()
+
+wilcox.test(foods_per_person_plants_meta$nplants~foods_per_person_plants_meta$fever7d_aboveavg) #p=0.1
+wilcox.test(foods_per_person_plants_meta$nplants_norm~foods_per_person_plants_meta$fever7d_aboveavg) #p=0.3
+
+foods_per_person_animals <- medi_abund_div %>% ungroup() %>% 
+  filter(phylum %in% c("Chordata")) %>% #only animals
+  #filter(sample_id %in% meta_seq$SampleID) %>% #keep only the clean samples - but because MEDI is sparse this is too strict
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  group_by(Participant_ID) %>% count(species) #or species / food id
+foods_per_person_animals #now there are no missing species. And all the species are animals.
+foods_per_person_animals <- as.data.frame(foods_per_person_animals) %>% count(Participant_ID) #how many unique entries per person
+foods_per_person_animals
+
+#normalize
+foods_per_person_animals_norm <- foods_per_person_animals %>%
+  rename(nanimals=n) %>%
+  full_join(samples_per_person)
+foods_per_person_animals_norm$nanimals <- ifelse(is.na(foods_per_person_animals_norm$nanimals), 0, foods_per_person_animals_norm$nanimals)
+foods_per_person_animals_norm$nanimals_norm <- foods_per_person_animals_norm$nanimals / foods_per_person_animals_norm$n #avg number unique plant foods per sample
+foods_per_person_animals_norm
+
+foods_per_person_animals_meta <- foods_per_person_animals_norm %>% 
+  full_join(meta) %>%
+  filter(!is.na(nanimals_norm))
+
+wilcox.test(foods_per_person_animals_meta$nanimals~foods_per_person_animals_meta$Diet2) #p=0.03
+wilcox.test(foods_per_person_animals_meta$nanimals_norm~foods_per_person_animals_meta$Diet2) #p=0.041 
+
+wilcox.test(foods_per_person_animals_meta$nanimals~foods_per_person_animals_meta$Diet3) #p=0.13
+wilcox.test(foods_per_person_animals_meta$nanimals_norm~foods_per_person_animals_meta$Diet3) #p=0.11
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2B.UniqueAnimalFoods.Diet.pdf")
+p <- ggplot(foods_per_person_animals_meta, aes(x=Diet2, y=nanimals)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  ylab("# Unique Animal Foods") + xlab("Diet") + 
+  annotate('segment', x=1, xend=2, y=7.25, yend=7.25) + 
+  annotate('text', x=1.5, y=7.5, label="*")
+p
+#dev.off()
+
+wilcox.test(foods_per_person_animals_meta$nanimals~foods_per_person_animals_meta$fever7d_aboveavg) #p=0.6
+wilcox.test(foods_per_person_animals_meta$nanimals_norm~foods_per_person_animals_meta$fever7d_aboveavg) #p=0.6
+
+```
+
+
+```{r food diversity baseline only}
+#the most basic kind of diversity: number of unique foods/food groups detected per person
+medi_abund_div <- medi_abund %>% group_by(sample_id) %>% filter(!duplicated(food_id))
+#what are the missing species?
+#medi_abund_div %>% filter(species=="") %>% View()
+medi_abund_div$species <- ifelse(medi_abund_div$species=="", yes=medi_abund_div$genus, no=medi_abund_div$species)
+#medi_abund_div %>% filter(species=="") %>% View()
+medi_abund_div <- medi_abund_div %>% filter(reads!=0) #why the empty rows!
+
+foods_per_person_plants <- medi_abund_div %>% ungroup() %>% 
+  filter(phylum %in% c("Streptophyta", "Basidiomycota")) %>% #only plants and fungi
+  #filter(sample_id %in% meta_seq$SampleID) %>% #keep only the clean samples - but because MEDI is sparse this is too strict
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  filter(sample_id %in% meta_seq[which(meta_seq$Stool_timing3=="before"),]$SampleID) %>% #only baseline samples
+  group_by(Participant_ID) %>% count(species) #number of different species / food ids consumed
+foods_per_person_plants #now there are no missing species. And all the species are plants.
+foods_per_person_plants <- as.data.frame(foods_per_person_plants) %>% count(Participant_ID) #how many unique entries per person
+foods_per_person_plants 
+
+#normalize this to the number of samples per person
+samples_per_person_baseline <- medi_abund %>% filter(!duplicated(sample_id)) %>%
+  filter(sample_id %in% meta_seq[which(meta_seq$Stool_timing3=="before"),]$SampleID) %>% #only baseline samples
+  count(Participant_ID) %>% as.data.frame()
+samples_per_person_baseline 
+
+#normalize
+foods_per_person_plants_norm <- foods_per_person_plants %>%
+  rename(nplants=n) %>%
+  full_join(samples_per_person_baseline) %>%
+  filter(Participant_ID %in% meta_seq$Participant_ID)
+foods_per_person_plants_norm$nplants <- ifelse(is.na(foods_per_person_plants_norm$nplants), 0, foods_per_person_plants_norm$nplants)
+foods_per_person_plants_norm$nplants_norm <- foods_per_person_plants_norm$nplants / foods_per_person_plants_norm$n #avg number unique plant foods per sample
+foods_per_person_plants_norm
+
+foods_per_person_plants_meta <- foods_per_person_plants_norm %>% 
+  full_join(meta) %>%
+  filter(!is.na(nplants_norm))
+foods_per_person_plants_meta %>% dplyr::select(Participant_ID, nplants_norm, Diet2, Diet3)
+
+wilcox.test(foods_per_person_plants_meta$nplants~foods_per_person_plants_meta$Diet2) #p=0.06 baseline
+wilcox.test(foods_per_person_plants_meta$nplants_norm~foods_per_person_plants_meta$Diet2) #p=0.06 baseline 
+
+wilcox.test(foods_per_person_plants_meta$nplants~foods_per_person_plants_meta$Diet3) #p=0.1
+wilcox.test(foods_per_person_plants_meta$nplants_norm~foods_per_person_plants_meta$Diet3) #p=0.1
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2A.UniquePlantFoods.Diet.pdf")
+p <- ggplot(foods_per_person_plants_meta, aes(x=Diet2, y=nplants)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  ylab("# Unique Plant Foods") + xlab("Diet") + 
+  annotate('segment', x=1, xend=2, y=34, yend=34) + 
+  annotate('text', x=1.5, y=35, label="p=0.14")
+p
+#dev.off()
+
+wilcox.test(foods_per_person_plants_meta$nplants~foods_per_person_plants_meta$fever7d_aboveavg) #p=0.5
+wilcox.test(foods_per_person_plants_meta$nplants_norm~foods_per_person_plants_meta$fever7d_aboveavg) #p=0.5
+
+foods_per_person_animals <- medi_abund_div %>% ungroup() %>% 
+  filter(phylum %in% c("Chordata")) %>% #only animals
+  #filter(sample_id %in% meta_seq$SampleID) %>% #keep only the clean samples - but because MEDI is sparse this is too strict
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  filter(sample_id %in% meta_seq[which(meta_seq$Stool_timing3=="before"),]$SampleID) %>% #only baseline samples
+  group_by(Participant_ID) %>% count(species) #or species / food id
+foods_per_person_animals #now there are no missing species. And all the species are animals.
+foods_per_person_animals <- as.data.frame(foods_per_person_animals) %>% count(Participant_ID) #how many unique entries per person
+foods_per_person_animals
+
+#normalize
+foods_per_person_animals_norm <- foods_per_person_animals %>%
+  rename(nanimals=n) %>%
+  full_join(samples_per_person_baseline)
+foods_per_person_animals_norm$nanimals <- ifelse(is.na(foods_per_person_animals_norm$nanimals), 0, foods_per_person_animals_norm$nanimals)
+foods_per_person_animals_norm$nanimals_norm <- foods_per_person_animals_norm$nanimals / foods_per_person_animals_norm$n #avg number unique plant foods per sample
+foods_per_person_animals_norm
+
+foods_per_person_animals_meta <- foods_per_person_animals_norm %>% 
+  full_join(meta) %>%
+  filter(!is.na(nanimals_norm))
+
+wilcox.test(foods_per_person_animals_meta$nanimals~foods_per_person_animals_meta$Diet2) #p=0.12 baseline
+wilcox.test(foods_per_person_animals_meta$nanimals_norm~foods_per_person_animals_meta$Diet2) #p=0.12
+
+wilcox.test(foods_per_person_animals_meta$nanimals~foods_per_person_animals_meta$Diet3) #p=0.12 baseline
+wilcox.test(foods_per_person_animals_meta$nanimals_norm~foods_per_person_animals_meta$Diet3) #p=0.12
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2B.UniqueAnimalFoods.Diet.pdf")
+p <- ggplot(foods_per_person_animals_meta, aes(x=Diet2, y=nanimals)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + ylab("# Unique Animal Foods") + xlab("Diet")
+p <- p + annotate('segment', x=1, xend=2, y=7.25, yend=7.25)
+p <- p + annotate('text', x=1.5, y=7.5, label="*")
+p
+#dev.off()
+
+wilcox.test(foods_per_person_animals_meta$nanimals~foods_per_person_animals_meta$fever7d_aboveavg) #p=0.5
+wilcox.test(foods_per_person_animals_meta$nanimals_norm~foods_per_person_animals_meta$fever7d_aboveavg) #p=0.5
+
+```
+
+```{r proportion plants}
+
+#Plants VS Animals as a ratio
+head(foods_per_person_plants_norm)
+head(foods_per_person_animals_norm)
+foods_per_person <- full_join(foods_per_person_plants_norm, foods_per_person_animals_norm)
+foods_per_person$total_foods <- foods_per_person$nplants + foods_per_person$nanimals
+foods_per_person$total_foods_norm <- foods_per_person$total_foods / foods_per_person$n
+foods_per_person$plant_ratio <- foods_per_person$nplants / foods_per_person$total_foods
+head(foods_per_person)
+
+foods_per_person_meta <- full_join(foods_per_person, meta)
+
+wilcox.test(foods_per_person_meta$total_foods~foods_per_person_meta$Diet2) #p=0.08
+wilcox.test(foods_per_person_meta$total_foods~foods_per_person_meta$Diet3) #p=0.19
+wilcox.test(foods_per_person_meta$total_foods~foods_per_person_meta$fever7d_aboveavg) #p=0.6
+
+wilcox.test(foods_per_person_meta$plant_ratio~foods_per_person_meta$Diet2) #p=0.1
+wilcox.test(foods_per_person_meta$plant_ratio~foods_per_person_meta$Diet3) #p=0.18
+wilcox.test(foods_per_person_meta$plant_ratio~foods_per_person_meta$fever7d_aboveavg) #p=0.5
+
+#note: this ratio doesn't need to be unique plants, could be done rather on all foods detected.
+
+#more realistically, starting again: what % of all foods detected per person were plants?
+foods_per_person_plants <- medi_abund_div %>% ungroup() %>% 
+  filter(phylum %in% c("Streptophyta", "Basidiomycota")) %>% #only plants and fungi
+  #filter(sample_id %in% meta_seq$SampleID) %>% #keep only the clean samples - but because MEDI is sparse this is too strict
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  group_by(Participant_ID) %>% count(species) #number of different species / food ids consumed
+foods_per_person_plants #now there are no missing species. And all the species are plants.
+#do not count again, i.e., leave as total plants rather than unique plants
+foods_per_person_plants <- foods_per_person_plants %>% group_by(Participant_ID) %>%
+  summarize(nplants=sum(n))
+foods_per_person_plants
+
+#normalize this to the total number of foods
+foods_per_person <- medi_abund_div %>% ungroup() %>%
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  group_by(Participant_ID) %>% count(species) #number of different species / food ids consumed, ALL
+foods_per_person #now there are no missing species. And all the species are plants.
+#do not count again, i.e., leave as total plants rather than unique plants
+foods_per_person <- foods_per_person %>% group_by(Participant_ID) %>%
+  summarize(n=sum(n))
+foods_per_person
+
+foods_per_person_plants <- full_join(foods_per_person_plants, foods_per_person)
+foods_per_person_plants$ratio_plants <- foods_per_person_plants$nplants/foods_per_person_plants$n
+head(foods_per_person_plants)
+
+foods_per_person_meta <- foods_per_person_plants %>% 
+  full_join(meta) %>%
+  filter(!is.na(nplants))
+foods_per_person_meta %>% dplyr::select(Participant_ID, ratio_plants, Diet2)
+
+wilcox.test(foods_per_person_meta$ratio_plants~foods_per_person_meta$Diet2) #p=0.02
+wilcox.test(foods_per_person_meta$ratio_plants~foods_per_person_meta$Diet3) #p=0.07
+wilcox.test(foods_per_person_meta$ratio_plants~foods_per_person_meta$fever7d_aboveavg) #p=0.4, NS
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2A.UniquePlantFoods.Diet.pdf")
+p <- ggplot(foods_per_person_meta, aes(x=Diet2, y=ratio_plants)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  ylab("% Plant Foods") + xlab("Diet") +
+  annotate('segment', x=1, xend=2, y=1.05, yend=1.05) + 
+  annotate('text', x=1.5, y=1.1, label="p=0.02")
+p
+#dev.off()
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/6B.PercentPlantFoods.Diet3.pdf")
+p <- ggplot(foods_per_person_meta, aes(x=Diet3, y=ratio_plants)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  ylab("% Plant Foods") + xlab("Diet") +
+  annotate('segment', x=1, xend=2, y=1.05, yend=1.05) + 
+  annotate('text', x=1.5, y=1.1, label="p=0.07")
+p
+#dev.off()
+
+
+```
+
+```{r medi wilcoxons foods, width=3, height=3}
+#Test - Diet and Fever vs Food
+#are they duplicated by genus?
+head(medi_abund)
+dups <- medi_abund %>% group_by(sample_id) %>% filter(duplicated(species))
+medi_abund %>% filter(sample_id %in% dups$sample_id & species %in% dups$species) %>% dplyr::select(wikipedia_id, genus, sample_id, kraken_raw_reads, relative_abundance)
+#yes, several things are definitely duplicated in a weird way - e.g. Rosella & Hibiscus are always double-counted. Sometimes also pork, etc.
+medi_abund_wilcox <- medi_abund %>% group_by(sample_id) %>% filter(!duplicated(species))
+#Now, summarize it as before, per person - but by e.g. wikipedia_id
+#fill in the empty wikipedia ids with a genus
+medi_abund_wilcox$wikipedia_id <- ifelse(medi_abund_wilcox$wikipedia_id=="", yes=medi_abund_wilcox$species, no=medi_abund_wilcox$wikipedia_id)
+medi_abund_wilcox_foodname <- medi_abund_wilcox %>% 
+  #filter(sample_id %in% meta_seq$SampleID) %>% #keep only the clean samples - but because MEDI is sparse this is too strict
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  group_by(Participant_ID, sample_id, wikipedia_id) %>%
+  summarize(relative_abundance=sum(relative_abundance)) %>% #first sum the categories by sample
+  group_by(Participant_ID, wikipedia_id) %>%
+  summarize(relative_abundance=mean(relative_abundance)) #then average by person over time
+medi_abund_wilcox_foodname
+#because H017 has no foods detected, give it a dummy food variable (abund=0)
+medi_abund_wilcox_foodname[which(medi_abund_wilcox_foodname$Participant_ID=="HEAT_017"),] #no abund
+medi_abund_wilcox_foodname[which(medi_abund_wilcox_foodname$Participant_ID=="HEAT_017"),]$wikipedia_id <- c("Oat") #dummy food for pivoting so that H017 is retained
+
+#then, make it wide. 
+medi_abund_wilcox_foodname_wide <- medi_abund_wilcox_foodname %>%
+  filter(wikipedia_id!="") %>% #otherwise, exclude the empty foods / samples
+  pivot_wider(names_from=wikipedia_id, values_from=relative_abundance) 
+medi_abund_wilcox_foodname_wide 
+dim(medi_abund_wilcox_foodname_wide) #147 different foods in 171 people.
+
+medi_abund_wilcox_foodname_wide <- medi_abund_wilcox_foodname_wide %>% filter(Participant_ID %in% meta$Participant_ID)
+meta <- meta[order(meta$Participant_ID),]
+
+identical(medi_abund_wilcox_foodname_wide$Participant_ID, meta$Participant_ID)
+
+medi_abund_wilcox <- as.data.frame(medi_abund_wilcox_foodname_wide)
+row.names(medi_abund_wilcox) <- medi_abund_wilcox$Participant_ID
+medi_abund_wilcox$Participant_ID <- NULL
+medi_abund_wilcox_t <- as.data.frame(t(medi_abund_wilcox))
+dim(medi_abund_wilcox_t) #171 participants in columns, 146 nutrients in rows
+##still need to filter for sparseness to some degree. Get rid of the mostly-zero rows, at least. That's why grouping is good though..
+medi_abund_wilcox_t <- medi_abund_wilcox_t[which(rowSums(is.na(medi_abund_wilcox_t))<(length(medi_abund_wilcox_t)*0.9)),]
+dim(medi_abund_wilcox_t) #171 participants in columns, 20 (!!) species in rows - I guess
+medi_abund_wilcox_t #great, all names present
+identical(colnames(medi_abund_wilcox_t), meta$Participant_ID) #lovely
+#replace the NA with zeroes for no detection.
+medi_abund_wilcox[is.na(medi_abund_wilcox)] <- 0 
+medi_abund_wilcox_t[is.na(medi_abund_wilcox_t)] <- 0
+
+#multiple wilcoxons - Diet by Food
+MW.p = apply(medi_abund_wilcox_t,1,
+             function(x) wilcox.test(c(x)~meta$Diet2)$p.value)
+MW.coef = apply(medi_abund_wilcox_t,1,
+                function(x) wilcox.test(c(x)~meta$Diet2)$statistic)
+pres <- data.frame(SampleID=names(MW.p), pval=MW.p, coef=MW.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+head(pres[order(pres$pval),]) 
+results_FoodsDiet <- pres[order(pres$qval),] %>% filter(pval<0.05)
+results_FoodsDiet 
+
+#multiple wilcoxons - Diet3 by Food
+MW.p = apply(medi_abund_wilcox_t,1,
+             function(x) wilcox.test(c(x)~meta$Diet3)$p.value)
+MW.coef = apply(medi_abund_wilcox_t,1,
+                function(x) wilcox.test(c(x)~meta$Diet3)$statistic)
+pres <- data.frame(SampleID=names(MW.p), pval=MW.p, coef=MW.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+head(pres[order(pres$pval),]) 
+results_FoodsDiet3 <- pres[order(pres$qval),] %>% filter(pval<0.05)
+results_FoodsDiet3 #pork is stronger, flax less so
+
+#multiple wilcoxons - Fever by Food
+MW.p = apply(medi_abund_wilcox_t,1,
+             function(x) wilcox.test(c(x)~meta$fever7d_aboveavg)$p.value)
+MW.coef = apply(medi_abund_wilcox_t,1,
+                function(x) wilcox.test(c(x)~meta$fever7d_aboveavg)$statistic)
+pres <- data.frame(SampleID=names(MW.p), pval=MW.p, coef=MW.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+head(pres[order(pres$pval),]) #unsurprisingly
+results_FoodsFever <- pres[order(pres$qval),] %>% filter(pval<0.05)
+results_FoodsFever #nothing by fever
+
+pdata1 <- data.frame(medi_abund_wilcox, meta)
+pdata1$Diet3 <- factor(pdata1$Diet3, levels=c("Veg", "Omni"))
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2A.DietFlax.pdf")
+p <- ggplot(pdata1, aes(x=Diet2, y=Flax)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab("Diet") + ylab("Relative Abundance") + ggtitle("Flax") + 
+  annotate('segment', x=1, xend=2, y=0.00021, yend=0.00021) + 
+  annotate('text', x=1.5, y=0.00022, label="***")
+p
+#dev.off()
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2A.Diet3Flax.pdf")
+p <- ggplot(pdata1, aes(x=Diet3, y=Flax)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab("Diet") + ylab("Relative Abundance") + ggtitle("Flax") + 
+  annotate('segment', x=1, xend=2, y=0.00021, yend=0.00021) + 
+  annotate('text', x=1.5, y=0.00022, label="*")
+p
+#dev.off()
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2B.DietPork.pdf")
+p <- ggplot(pdata1, aes(x=Diet2, y=Wild.boar)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab("Diet") + ylab("Relative Abundance") + ggtitle("Pork") + 
+  annotate('segment', x=1, xend=2, y=1.5e-05, yend=1.5e-05) + 
+  annotate('text', x=1.5, y=1.75e-05, label="*")
+p
+#dev.off()
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2B.Diet3Pork.pdf")
+p <- ggplot(pdata1, aes(x=Diet3, y=Wild.boar)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab("Diet") + ylab("Relative Abundance") + ggtitle("Pork") + 
+  annotate('segment', x=1, xend=2, y=1.5e-05, yend=1.5e-05) + 
+  annotate('text', x=1.5, y=1.75e-05, label="*")
+p
+#dev.off()
+
+```
+
+```{r medi wilcoxons nutrients}
+
+#Nutrients #allow absolute values since it is already normalized per 100 g and this allows Energy, etc.
+dim(medi_content_wide_abs)
+medi_content_wide_abs$Participant_ID
+medi_content_wide_abs[171,1] <- c("HEAT_017") #add back missing data for no detection
+medi_content_wide_abs[171,2:length(names(medi_content_wide_abs))] <- c(0)
+medi_content_wilcox <- medi_content_wide_abs
+medi_content_wilcox <- medi_content_wilcox[order(medi_content_wilcox$Participant_ID),]
+identical(medi_content_wilcox$Participant_ID, meta$Participant_ID)  
+
+medi_content_wilcox <- as.data.frame(medi_content_wilcox)
+row.names(medi_content_wilcox) <- medi_content_wilcox$Participant_ID
+medi_content_wilcox$Participant_ID <- NULL
+medi_content_wilcox_t <- as.data.frame(t(medi_content_wilcox))
+dim(medi_content_wilcox_t) #171 participants in columns, 1250 nutrients in rows
+##get rid of the extremely sparse nutrients #e.g. less than 10% prevalent - row-wise filter
+medi_content_wilcox_t <- medi_content_wilcox_t[which(rowSums(is.na(medi_content_wilcox_t))<(length(medi_content_wilcox_t)*0.8)),]
+dim(medi_content_wilcox_t) #171 participants in columns, 381 nutrients in rows
+#View(medi_content_wilcox_t) #great, all names present
+identical(colnames(medi_content_wilcox_t), meta$Participant_ID) #lovely
+
+#replace the NA with zeroes for no detection.
+medi_content_wilcox[is.na(medi_content_wilcox)] <- 0 
+medi_content_wilcox_t[is.na(medi_content_wilcox_t)] <- 0
+
+#multiple wilcoxons: Diet vs Nutrients
+MW.p = apply(medi_content_wilcox_t,1,
+             function(x) wilcox.test(c(x)~meta$Diet2)$p.value)
+MW.coef = apply(medi_content_wilcox_t,1,
+                function(x) wilcox.test(c(x)~meta$Diet2)$statistic)
+pres <- data.frame(SampleID=names(MW.p), pval=MW.p, coef=MW.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+head(pres[order(pres$pval),]) #nothing is FDR significant. :( but there are some pval sig things
+results_NutrientsDiet <- pres[order(pres$pval),] %>% filter(qval<0.05)
+results_NutrientsDiet #these are however probably a little sparse - with caution
+
+#inspect specific nutrients of interest: major categories Calories, Fibre, Fat, Sugar, Protein, Carb.
+targeted_results_NutrientsDiet <- pres[order(pres$pval),] %>% mutate(Nutrient=row.names(pres[order(pres$pval),])) 
+targeted_results_NutrientsDiet$Nutrient
+dplyr::count(medi_content, name)
+targeted_results_NutrientsDiet <- targeted_results_NutrientsDiet %>%
+  filter(Nutrient %in% c('Energy', 'Fat', 'Sugars', 'Proteins', 'Carbohydrate', 'Fiber (dietary)',
+                         'Cholesterol'))
+targeted_results_NutrientsDiet #a trend for Energy, i.e. calories, but NS
+
+#multiple wilcoxons: Diet3 vs Nutrients
+MW.p = apply(medi_content_wilcox_t,1,
+             function(x) wilcox.test(c(x)~meta$Diet3)$p.value)
+MW.coef = apply(medi_content_wilcox_t,1,
+                function(x) wilcox.test(c(x)~meta$Diet3)$statistic)
+pres <- data.frame(SampleID=names(MW.p), pval=MW.p, coef=MW.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+head(pres[order(pres$pval),]) #nothing is FDR significant. :( but there are some pval sig things
+results_NutrientsDiet3 <- pres[order(pres$pval),] %>% filter(qval<0.05)
+results_NutrientsDiet3 #these are however probably a little sparse - with caution
+
+
+#inspect specific nutrients of interest: major categories Calories, Fibre, Fat, Sugar, Protein, Carb.
+targeted_results_NutrientsDiet3 <- pres[order(pres$pval),] %>% mutate(Nutrient=row.names(pres[order(pres$pval),])) 
+targeted_results_NutrientsDiet3$Nutrient
+dplyr::count(medi_content, name)
+targeted_results_NutrientsDiet3 <- targeted_results_NutrientsDiet3 %>%
+  filter(Nutrient %in% c('Energy', 'Fat', 'Sugars', 'Proteins', 'Carbohydrate', 'Fiber (dietary)',
+                         'Cholesterol'))
+targeted_results_NutrientsDiet3 #very similar results. a trend for Energy, i.e. calories, but NS
+
+#multiple wilcoxons: Fever vs Nutrients
+MW.p = apply(medi_content_wilcox_t,1,
+             function(x) wilcox.test(c(x)~meta$fever7d_aboveavg)$p.value)
+MW.coef = apply(medi_content_wilcox_t,1,
+                function(x) wilcox.test(c(x)~meta$fever7d_aboveavg)$statistic)
+pres <- data.frame(SampleID=names(MW.p), pval=MW.p, coef=MW.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+head(pres[order(pres$pval),]) 
+results_NutrientsFever <- pres[order(pres$pval),] %>% filter(pval<0.05)
+results_NutrientsFever #unlike Diet, barely anything significant even at raw p value
+
+#inspect specific nutrients of interest: major categories Calories, Fibre, Fat, Sugar, Protein, Carb.
+targeted_results_NutrientsFever <- pres[order(pres$pval),] %>% mutate(Nutrient=row.names(pres[order(pres$pval),])) 
+targeted_results_NutrientsFever$Nutrient
+dplyr::count(medi_content, name)
+targeted_results_NutrientsFever <- targeted_results_NutrientsFever %>%
+  filter(Nutrient %in% c('Energy', 'Fat', 'Sugars', 'Proteins', 'Carbohydrate', 'Fiber (dietary)',
+                         'Cholesterol')) #because of metabolomics results
+targeted_results_NutrientsFever #no trends
+
+```
+
+```{r medi wilcoxons nutrients class}
+
+#Nutrients #allow absolute values since it is already normalized per 100 g and this allows Energy, etc.
+dim(medi_content_wide_class)
+medi_content_wide_class$Participant_ID
+medi_content_wide_class[171,1] <- c("HEAT_017") #add back missing data for no detection
+medi_content_wide_class[171,2:length(names(medi_content_wide_class))] <- c(0)
+medi_content_wilcox <- medi_content_wide_class
+medi_content_wilcox <- medi_content_wilcox[order(medi_content_wilcox$Participant_ID),]
+identical(medi_content_wilcox$Participant_ID, meta$Participant_ID)  
+
+medi_content_wilcox <- as.data.frame(medi_content_wilcox)
+row.names(medi_content_wilcox) <- medi_content_wilcox$Participant_ID
+medi_content_wilcox$Participant_ID <- NULL
+medi_content_wilcox_t <- as.data.frame(t(medi_content_wilcox))
+dim(medi_content_wilcox_t) #171 participants in columns, 1250 nutrients in rows
+##get rid of the extremely sparse nutrients #e.g. less than 10% prevalent - row-wise filter
+medi_content_wilcox_t <- medi_content_wilcox_t[which(rowSums(is.na(medi_content_wilcox_t))<(length(medi_content_wilcox_t)*0.8)),]
+dim(medi_content_wilcox_t) #171 participants in columns, 381 nutrients in rows
+#View(medi_content_wilcox_t) #great, all names present
+identical(colnames(medi_content_wilcox_t), meta$Participant_ID) #lovely
+
+#replace the NA with zeroes for no detection.
+medi_content_wilcox[is.na(medi_content_wilcox)] <- 0 
+medi_content_wilcox_t[is.na(medi_content_wilcox_t)] <- 0
+
+#multiple wilcoxons: Diet vs Nutrients (Class level)
+MW.p = apply(medi_content_wilcox_t,1,
+             function(x) wilcox.test(c(x)~meta$Diet2)$p.value)
+MW.coef = apply(medi_content_wilcox_t,1,
+                function(x) wilcox.test(c(x)~meta$Diet2)$statistic)
+pres <- data.frame(SampleID=names(MW.p), pval=MW.p, coef=MW.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+head(pres[order(pres$pval),]) #nothing is FDR significant. :( - top hit alcohols
+results_NutrientsDiet <- pres[order(pres$pval),] %>% filter(qval<0.05)
+results_NutrientsDiet #nothing at class level
+
+#multiple wilcoxons: Diet3 vs Nutrients
+MW.p = apply(medi_content_wilcox_t,1,
+             function(x) wilcox.test(c(x)~meta$Diet3)$p.value)
+MW.coef = apply(medi_content_wilcox_t,1,
+                function(x) wilcox.test(c(x)~meta$Diet3)$statistic)
+pres <- data.frame(SampleID=names(MW.p), pval=MW.p, coef=MW.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+head(pres[order(pres$pval),]) #nothing is FDR significant - top hit flavanoids
+results_NutrientsDiet3 <- pres[order(pres$pval),] %>% filter(qval<0.05)
+results_NutrientsDiet3 #nothing
+
+#multiple wilcoxons: Fever vs Nutrients
+MW.p = apply(medi_content_wilcox_t,1,
+             function(x) wilcox.test(c(x)~meta$fever7d_aboveavg)$p.value)
+MW.coef = apply(medi_content_wilcox_t,1,
+                function(x) wilcox.test(c(x)~meta$fever7d_aboveavg)$statistic)
+pres <- data.frame(SampleID=names(MW.p), pval=MW.p, coef=MW.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+head(pres[order(pres$pval),]) #nothing even close
+results_NutrientsFever <- pres[order(pres$pval),] %>% filter(pval<0.05)
+results_NutrientsFever #unlike Diet, barely anything significant even at raw p value
+
+```
+
+```{r maaslin2 foods}
+#per sample medi 
+medi_abund_wilcox <- medi_abund %>% group_by(sample_id) %>% filter(!duplicated(species))
+medi_abund_wilcox$wikipedia_id <- ifelse(medi_abund_wilcox$wikipedia_id=="", yes=medi_abund_wilcox$species, no=medi_abund_wilcox$wikipedia_id)
+
+medi_abund_wilcox_foodname <- medi_abund_wilcox %>% 
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  group_by(sample_id, wikipedia_id) %>%
+  dplyr::summarize(relative_abundance=sum(relative_abundance)) # sum the categories by sample
+medi_abund_wilcox_foodname
+
+#join it with the meta_seq table to gain back the no-detection samples
+medi_abund_wilcox_foodname <- medi_abund_wilcox_foodname %>% full_join(meta_seq, by=c("sample_id"="SampleID"))
+medi_abund_wilcox_foodname$wikipedia_id <- ifelse(medi_abund_wilcox_foodname$wikipedia_id=="", 
+                                                  yes="Oat", 
+                                                  no=medi_abund_wilcox_foodname$wikipedia_id)  #dummy food
+medi_abund_wilcox_foodname$relative_abundance <- ifelse(is.na(medi_abund_wilcox_foodname$relative_abundance),
+                                                        0, medi_abund_wilcox_foodname$relative_abundance) #dummy food is 0 abundant
+
+
+#then, make it wide. 
+medi_abund_wilcox_foodname_wide <- medi_abund_wilcox_foodname %>%
+  dplyr::select(!any_of(names(meta_seq))) %>%
+  pivot_wider(names_from=wikipedia_id, values_from=relative_abundance) 
+medi_abund_wilcox_foodname_wide 
+dim(medi_abund_wilcox_foodname_wide) #147 different foods in 964 samples
+
+medi_abund_wilcox_foodname_wide <- medi_abund_wilcox_foodname_wide %>% filter(sample_id %in% meta_seq$SampleID)
+meta_seq <- meta_seq[order(meta_seq$SampleID),]
+medi_abund_wilcox_foodname_wide <- medi_abund_wilcox_foodname_wide[order(medi_abund_wilcox_foodname_wide$sample_id),]
+
+medi_abund_wilcox <- as.data.frame(medi_abund_wilcox_foodname_wide)
+row.names(medi_abund_wilcox) <- medi_abund_wilcox$sample_id
+medi_abund_wilcox$sample_id <- NULL
+medi_abund_wilcox_t <- as.data.frame(t(medi_abund_wilcox))
+dim(medi_abund_wilcox_t) #1022 samples in columns, 146 nutrients in rows
+#replace the NA with zeroes for no detection.
+medi_abund_wilcox[is.na(medi_abund_wilcox)] <- 0 
+medi_abund_wilcox_t[is.na(medi_abund_wilcox_t)] <- 0
+
+identical(row.names(medi_abund_wilcox), meta_seq$SampleID)
+identical(names(medi_abund_wilcox_t), meta_seq$SampleID)
+row.names(meta_seq) <- meta_seq$SampleID
+
+#now do a Maaslin2 linear model.
+#Diet with technical covariates only
+fit_data = Maaslin2(
+  input_data = medi_abund_wilcox_t, 
+  input_metadata = meta_seq, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth", "Bristol_Stool_Score", "Time_at_RT", 
+                    "Diet2"),
+  random_effects = c("Participant_ID"), 
+  #reference=c("Sex", "m"), #tell it to use male as ref for Sex
+  normalization="tss", #total sum scaling
+  #min_abundance=0.0001, #min abundance 10^-3; anything lower gets unbelievable
+  min_prevalence=0.1, #must be present in 10% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+medi_res1 <- fit_data$results
+medi_res1 %>% dplyr::filter(qval<0.05&metadata=="Diet2") #no associations
+
+#Diet with technical covariates only
+fit_data = Maaslin2(
+  input_data = medi_abund_wilcox_t, 
+  input_metadata = meta_seq, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth", "Bristol_Stool_Score", "Time_at_RT", 
+                    "Diet3"),
+  random_effects = c("Participant_ID"), 
+  #reference=c("Sex", "m"), #tell it to use male as ref for Sex
+  normalization="tss", #total sum scaling
+  #min_abundance=0.0001, #min abundance 10^-3; anything lower gets unbelievable
+  min_prevalence=0.1, #must be present in 10% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+medi_res1 <- fit_data$results
+medi_res1 %>% dplyr::filter(qval<0.05&metadata=="Diet3") #no associations
+
+#Fever - overall (genus) #7d fever with technical covariates only
+fit_data = Maaslin2(
+  input_data = medi_abund_wilcox_t, 
+  input_metadata = meta_seq, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth", "Bristol_Stool_Score", "Time_at_RT", 
+                    "fever7d_aboveavg"),
+  random_effects = c("Participant_ID"), 
+  #reference=c("Sex", "m"), #tell it to use male as ref for Sex
+  normalization="tss", #total sum scaling
+  #min_abundance=0.0001, #min abundance 10^-3; anything lower gets unbelievable
+  min_prevalence=0.1, #must be present in 10% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+medi_res <- fit_data$results
+medi_res %>% dplyr::filter(qval<0.05&metadata=="fever7d_aboveavg") 
+
+#Fever adjusting for Diet
+fit_data = Maaslin2(
+  input_data = medi_abund_wilcox_t, 
+  input_metadata = meta_seq, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth", "Bristol_Stool_Score", "Time_at_RT", 
+                    "Diet3", "fever7d_aboveavg"),
+  random_effects = c("Participant_ID"), 
+  #reference=c("Sex", "m"), #tell it to use male as ref for Sex
+  normalization="tss", #total sum scaling
+  #min_abundance=0.0001, #min abundance 10^-3; anything lower gets unbelievable
+  min_prevalence=0.1, #must be present in 10% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+medi_res <- fit_data$results
+medi_res %>% dplyr::filter(qval<0.05&metadata=="fever7d_aboveavg") #nothing
+
+```
+
+
+```{r medi wilcoxons baseline only, width=3, height=3}
+#Test - Diet and Fever vs Food
+#are they duplicated by genus?
+head(medi_abund)
+dups <- medi_abund %>% group_by(sample_id) %>% filter(duplicated(species))
+medi_abund %>% filter(sample_id %in% dups$sample_id & species %in% dups$species) %>% dplyr::select(wikipedia_id, genus, sample_id, kraken_raw_reads, relative_abundance)
+#yes, several things are definitely duplicated in a weird way - e.g. Rosella & Hibiscus are always double-counted. Sometimes also pork, etc.
+medi_abund_wilcox <- medi_abund %>% group_by(sample_id) %>% filter(!duplicated(species))
+#Now, summarize it as before, per person - but by e.g. wikipedia_id
+#fill in the empty wikipedia ids with a genus
+medi_abund_wilcox$wikipedia_id <- ifelse(medi_abund_wilcox$wikipedia_id=="", yes=medi_abund_wilcox$species, no=medi_abund_wilcox$wikipedia_id)
+medi_abund_wilcox_foodname <- medi_abund_wilcox %>% 
+  #filter(sample_id %in% meta_seq$SampleID) %>% #keep only the clean samples - but because MEDI is sparse this is too strict
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  filter(sample_id %in% meta_seq[which(meta_seq$Stool_timing3=="before"),]$SampleID) %>% #only baseline samples
+  group_by(Participant_ID, sample_id, wikipedia_id) %>%
+  summarize(relative_abundance=sum(relative_abundance)) %>% #first sum the categories by sample
+  group_by(Participant_ID, wikipedia_id) %>%
+  summarize(relative_abundance=mean(relative_abundance)) #then average by person over time
+medi_abund_wilcox_foodname
+
+#then, make it wide. 
+medi_abund_wilcox_foodname_wide <- medi_abund_wilcox_foodname %>%
+  filter(wikipedia_id!="") %>% #otherwise, exclude the empty foods / samples
+  pivot_wider(names_from=wikipedia_id, values_from=relative_abundance) 
+medi_abund_wilcox_foodname_wide 
+dim(medi_abund_wilcox_foodname_wide) #147 different foods in 167 people - some missing data. ?
+
+#some samples are missing because no foods detected.!
+#merge...
+medi_abund_wilcox_foodname_wide_meta <- full_join(medi_abund_wilcox_foodname_wide, meta)
+#unmerge...
+medi_abund_wilcox_foodname_wide <- medi_abund_wilcox_foodname_wide_meta[,c(1:length(names(medi_abund_wilcox_foodname_wide)))]
+#check...
+meta <- meta[order(meta$Participant_ID),]
+medi_abund_wilcox_foodname_wide <- medi_abund_wilcox_foodname_wide[order(medi_abund_wilcox_foodname_wide$Participant_ID),]
+
+identical(medi_abund_wilcox_foodname_wide$Participant_ID, meta$Participant_ID)
+
+
+medi_abund_wilcox <- as.data.frame(medi_abund_wilcox_foodname_wide)
+row.names(medi_abund_wilcox) <- medi_abund_wilcox$Participant_ID
+medi_abund_wilcox$Participant_ID <- NULL
+medi_abund_wilcox_t <- as.data.frame(t(medi_abund_wilcox))
+dim(medi_abund_wilcox_t) #171 participants in columns, 146 nutrients in rows
+##still need to filter for sparseness to some degree. Get rid of the mostly-zero rows, at least. That's why grouping is good though..
+medi_abund_wilcox_t <- medi_abund_wilcox_t[which(rowSums(is.na(medi_abund_wilcox_t))<(length(medi_abund_wilcox_t)*0.9)),]
+dim(medi_abund_wilcox_t) #171 participants in columns, 20 (!!) species in rows - I guess
+medi_abund_wilcox_t #great, all names present
+identical(colnames(medi_abund_wilcox_t), meta$Participant_ID) #lovely
+#replace the NA with zeroes for no detection.
+medi_abund_wilcox[is.na(medi_abund_wilcox)] <- 0 
+medi_abund_wilcox_t[is.na(medi_abund_wilcox_t)] <- 0
+
+#multiple wilcoxons - Diet by Food #Baseline
+MW.p = apply(medi_abund_wilcox_t,1,
+             function(x) wilcox.test(c(x)~meta$Diet2)$p.value)
+MW.coef = apply(medi_abund_wilcox_t,1,
+                function(x) wilcox.test(c(x)~meta$Diet2)$statistic)
+pres <- data.frame(SampleID=names(MW.p), pval=MW.p, coef=MW.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+head(pres[order(pres$pval),]) 
+results_FoodsDiet_baseline <- pres[order(pres$qval),] %>% filter(pval<0.05)
+results_FoodsDiet_baseline #still flax
+
+#multiple wilcoxons - Diet3 by Food #Baseline
+MW.p = apply(medi_abund_wilcox_t,1,
+             function(x) wilcox.test(c(x)~meta$Diet3)$p.value)
+MW.coef = apply(medi_abund_wilcox_t,1,
+                function(x) wilcox.test(c(x)~meta$Diet3)$statistic)
+pres <- data.frame(SampleID=names(MW.p), pval=MW.p, coef=MW.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+head(pres[order(pres$pval),]) 
+results_FoodsDiet3_baseline <- pres[order(pres$qval),] %>% filter(pval<0.05)
+results_FoodsDiet3_baseline #flax is NS but raw sig
+
+#multiple wilcoxons - Fever by Food
+MW.p = apply(medi_abund_wilcox_t,1,
+             function(x) wilcox.test(c(x)~meta$fever7d_aboveavg)$p.value)
+MW.coef = apply(medi_abund_wilcox_t,1,
+                function(x) wilcox.test(c(x)~meta$fever7d_aboveavg)$statistic)
+pres <- data.frame(SampleID=names(MW.p), pval=MW.p, coef=MW.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+head(pres[order(pres$pval),]) #unsurprisingly
+results_FoodsFever_baseline <- pres[order(pres$qval),] %>% filter(pval<0.05)
+results_FoodsFever_baseline #still nothing
+
+#Nutrients #allow absolute values since it is already normalized per 100 g and this allows Energy, etc.
+head(medi_content_nodups)
+#Now, summarize it as before, per person
+medi_content_wilcox_nutrient <- medi_content_nodups %>% 
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  filter(sample_id %in% meta_seq[which(meta_seq$Stool_timing3=="before"),]$SampleID) %>% #only baseline samples
+  group_by(Participant_ID, name) %>% #per person
+  summarize(abundance=mean(abundance)) #average abundance per person
+ medi_content_wilcox_nutrient
+
+#then, make it wide. 
+medi_content_wilcox_nutrient_wide <- medi_content_wilcox_nutrient %>%
+  filter(name!="") %>%
+  pivot_wider(names_from=name, values_from=abundance) 
+medi_content_wilcox_nutrient_wide 
+dim(medi_content_wilcox_nutrient_wide) #1208 different nutrients in 165 samples
+
+medi_content_wilcox_nutrient_wide <- medi_content_wilcox_nutrient_wide %>% filter(Participant_ID %in% meta$Participant_ID)
+#some samples are missing because no foods detected.!
+#merge...
+medi_content_wilcox_nutrient_wide_meta <- full_join(medi_content_wilcox_nutrient_wide, meta)
+#unmerge...
+medi_content_wilcox_nutrient_wide <- medi_content_wilcox_nutrient_wide_meta[,c(1:length(names(medi_content_wilcox_nutrient_wide)))]
+#check...
+meta <- meta[order(meta$Participant_ID),]
+medi_content_wilcox_nutrient_wide <- medi_content_wilcox_nutrient_wide[order(medi_content_wilcox_nutrient_wide$Participant_ID),]
+
+identical(medi_content_wilcox_nutrient_wide$Participant_ID, meta$Participant_ID)
+
+ 
+medi_content_wilcox <- as.data.frame(medi_content_wilcox_nutrient_wide)
+row.names(medi_content_wilcox) <- medi_content_wilcox$Participant_ID
+medi_content_wilcox$Participant_ID <- NULL
+medi_content_wilcox_t <- as.data.frame(t(medi_content_wilcox))
+dim(medi_content_wilcox_t) #171 participants in columns, 146 nutrients in rows
+##still need to filter for sparseness to some degree. Get rid of the mostly-zero rows, at least. That's why grouping is good though..
+medi_content_wilcox_t <- medi_content_wilcox_t[which(rowSums(is.na(medi_content_wilcox_t))<(length(medi_content_wilcox_t)*0.9)),]
+dim(medi_content_wilcox_t) #1068 samples in columns, 265 (!!) nutrients in rows - I guess
+medi_content_wilcox_t #great, all names present
+identical(colnames(medi_content_wilcox_t), meta$Participant_ID) #lovely
+#replace the NA with zeroes for no detection.
+medi_content_wilcox[is.na(medi_content_wilcox)] <- 0 
+medi_content_wilcox_t[is.na(medi_content_wilcox_t)] <- 0
+
+#multiple wilcoxons: Diet vs Nutrients
+MW.p = apply(medi_content_wilcox_t,1,
+             function(x) wilcox.test(c(x)~meta$Diet2)$p.value)
+MW.coef = apply(medi_content_wilcox_t,1,
+                function(x) wilcox.test(c(x)~meta$Diet2)$statistic)
+pres <- data.frame(SampleID=names(MW.p), pval=MW.p, coef=MW.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+head(pres[order(pres$pval),]) #nothing is FDR significant. :( but there are some pval sig things
+results_NutrientsDiet_baseline <- pres[order(pres$pval),] %>% filter(qval<0.05)
+results_NutrientsDiet_baseline #these are however probably a little sparse - with caution
+
+#inspect specific nutrients of interest: major categories Calories, Fibre, Fat, Sugar, Protein, Carb.
+targeted_results_NutrientsDiet_baseline <- pres[order(pres$pval),] %>% mutate(Nutrient=row.names(pres[order(pres$pval),])) 
+targeted_results_NutrientsDiet_baseline$Nutrient
+dplyr::count(medi_content, name)
+targeted_results_NutrientsDiet_baseline <- targeted_results_NutrientsDiet_baseline %>%
+  filter(Nutrient %in% c('Energy', 'Fat', 'Sugars', 'Proteins', 'Carbohydrate', 'Fiber (Dietary)',
+                         'Cholesterol'))
+targeted_results_NutrientsDiet_baseline #Energy at baseline (raw) significant, and fat is borderline
+
+
+#multiple wilcoxons: Diet3 vs Nutrients
+MW.p = apply(medi_content_wilcox_t,1,
+             function(x) wilcox.test(c(x)~meta$Diet3)$p.value)
+MW.coef = apply(medi_content_wilcox_t,1,
+                function(x) wilcox.test(c(x)~meta$Diet3)$statistic)
+pres <- data.frame(SampleID=names(MW.p), pval=MW.p, coef=MW.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+head(pres[order(pres$pval),]) #
+results_NutrientsDiet3_baseline <- pres[order(pres$pval),] %>% filter(qval<0.05)
+results_NutrientsDiet3_baseline #nothing
+
+#inspect specific nutrients of interest: major categories Calories, Fibre, Fat, Sugar, Protein, Carb.
+targeted_results_NutrientsDiet3_baseline <- pres[order(pres$pval),] %>% mutate(Nutrient=row.names(pres[order(pres$pval),])) 
+targeted_results_NutrientsDiet3_baseline$Nutrient
+dplyr::count(medi_content, name)
+targeted_results_NutrientsDiet3_baseline <- targeted_results_NutrientsDiet3_baseline %>%
+  filter(Nutrient %in% c('Energy', 'Fat', 'Sugars', 'Proteins', 'Carbohydrate', 'Fiber (Dietary)',
+                         'Cholesterol'))
+targeted_results_NutrientsDiet3_baseline #significance reduced
+
+
+#multiple wilcoxons: Fever vs Nutrients
+MW.p = apply(medi_content_wilcox_t,1,
+             function(x) wilcox.test(c(x)~meta$fever7d_aboveavg)$p.value)
+MW.coef = apply(medi_content_wilcox_t,1,
+                function(x) wilcox.test(c(x)~meta$fever7d_aboveavg)$statistic)
+pres <- data.frame(SampleID=names(MW.p), pval=MW.p, coef=MW.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+head(pres[order(pres$pval),]) 
+results_NutrientsFever_baseline <- pres[order(pres$pval),] %>% filter(pval<0.05)
+results_NutrientsFever_baseline #some trends e.g. Glucose ?? different by fever??
+
+#inspect specific nutrients of interest: major categories Calories, Fibre, Fat, Sugar, Protein, Carb.
+targeted_results_NutrientsFever_baseline <- pres[order(pres$pval),] %>% mutate(Nutrient=row.names(pres[order(pres$pval),])) 
+targeted_results_NutrientsFever_baseline$Nutrient
+dplyr::count(medi_content, name)
+targeted_results_NutrientsFever_baseline <- targeted_results_NutrientsFever_baseline %>%
+  filter(Nutrient %in% c('Energy', 'Fat', 'Sugars', 'Proteins', 'Carbohydrate', 'Fiber (dietary)',
+                         'Cholesterol')) #because of metabolomics results
+targeted_results_NutrientsFever_baseline #no trends
+
+#huh but what does the Glucose hit look like?
+identical(row.names(medi_content_wilcox), meta$Participant_ID)
+pdata <- data.frame(medi_content_wilcox, meta)
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2A.DietFlax.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=D.Glucose)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + xlab("Diet") + ylab("Relative Abundance") + ggtitle("Glucose")
+#p <- p + annotate('segment', x=1, xend=2, y=0.00021, yend=0.00021)
+#p <- p + annotate('text', x=1.5, y=0.00022, label="***")
+p
+#dev.off()
+
+
+```
+
+
+```{r medi total food reads}
+
+#get rid of duplicated foods, clean up names
+medi_abund_wilcox <- medi_abund %>% 
+  group_by(sample_id) %>% 
+  filter(!duplicated(species))
+medi_abund_wilcox$wikipedia_id <- ifelse(medi_abund_wilcox$wikipedia_id=="", yes=medi_abund_wilcox$species, no=medi_abund_wilcox$wikipedia_id)
+
+#summarize total reads per phylum
+medi_abund_wilcox_phylum <- medi_abund_wilcox %>% 
+  #filter(sample_id %in% meta_seq$SampleID) %>% #keep only the clean samples - but because MEDI is sparse this is too strict
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  group_by(Participant_ID, sample_id, phylum) %>%
+  summarize(reads=sum(reads, na.rm=TRUE), #first sum the categories by sample
+            relabund=sum(relative_abundance, na.rm=TRUE)) %>% 
+  group_by(Participant_ID, phylum) %>%
+  summarize(reads=sum(reads, na.rm=TRUE), #then sum or average by person over time 
+            relabund=mean(relabund, na.rm=TRUE)) 
+medi_abund_wilcox_phylum
+
+#because H017 has no foods detected, give it a dummy food variable (abund=0)
+medi_abund_wilcox_phylum[which(medi_abund_wilcox_phylum$Participant_ID=="HEAT_017"),] #no abund
+medi_abund_wilcox_phylum[which(medi_abund_wilcox_phylum$Participant_ID=="HEAT_017"),]$phylum <- c("Streptophyta") #dummy variable for pivoting so that H017 is retained
+
+#also add # of samples per person as per earlier
+samples_per_person 
+
+#normalize
+medi_abund_wilcox_phylum_norm <- medi_abund_wilcox_phylum %>%
+  full_join(samples_per_person) %>%
+  filter(Participant_ID %in% meta_seq$Participant_ID)
+medi_abund_wilcox_phylum_norm$reads_norm <- medi_abund_wilcox_phylum_norm$reads / medi_abund_wilcox_phylum_norm$n #avg number per sample
+medi_abund_wilcox_phylum_norm
+
+
+#then, make it wide. 
+medi_abund_wilcox_phylum_wide <- medi_abund_wilcox_phylum_norm %>%
+  filter(phylum!="") %>%
+  pivot_wider(names_from=phylum, values_from=c(reads, relabund, reads_norm)) 
+medi_abund_wilcox_phylum_wide 
+dim(medi_abund_wilcox_phylum_wide) #171 participants
+
+#replace the NA with zeroes for no detection.
+medi_abund_wilcox_phylum_wide[is.na(medi_abund_wilcox_phylum_wide)] <- 0
+
+#add categories
+medi_abund_wilcox_phylum_wide$reads_StreptophytaBasidiomycota <- medi_abund_wilcox_phylum_wide$reads_Streptophyta + medi_abund_wilcox_phylum_wide$reads_Basidiomycota
+medi_abund_wilcox_phylum_wide$Total_Food_Reads <- medi_abund_wilcox_phylum_wide$reads_Chordata + medi_abund_wilcox_phylum_wide$reads_Streptophyta + medi_abund_wilcox_phylum_wide$reads_Basidiomycota
+
+medi_abund_wilcox_phylum_wide$reads_normStreptophytaBasidiomycota <- medi_abund_wilcox_phylum_wide$reads_norm_Streptophyta + medi_abund_wilcox_phylum_wide$reads_norm_Basidiomycota
+medi_abund_wilcox_phylum_wide$Total_Food_Reads_norm <- medi_abund_wilcox_phylum_wide$reads_norm_Chordata + medi_abund_wilcox_phylum_wide$reads_norm_Streptophyta + medi_abund_wilcox_phylum_wide$reads_norm_Basidiomycota
+
+medi_abund_wilcox_phylum_wide$relabund_StreptophytaBasidiomycota <- medi_abund_wilcox_phylum_wide$relabund_Streptophyta + medi_abund_wilcox_phylum_wide$relabund_Basidiomycota
+medi_abund_wilcox_phylum_wide$Total_Food_relabund <- medi_abund_wilcox_phylum_wide$relabund_Chordata + medi_abund_wilcox_phylum_wide$relabund_Streptophyta + medi_abund_wilcox_phylum_wide$relabund_Basidiomycota
+
+#write out this table for later correlation e.g. with somalogic data
+#write.csv(medi_abund_wilcox_phylum_wide, "/ebio/abt3_projects2/uHEAT/data/Medi/Medi_reads_per_sample_24.10.22.csv")
+
+#simple test.
+#medi_abund_wilcox_phylum_wide <- as.data.frame(medi_abund_wilcox_phylum_wide[,order(names(medi_abund_wilcox_phylum_wide))])
+#meta <- meta[order(meta$Participant_ID),]
+identical(medi_abund_wilcox_phylum_wide$Participant_ID, meta$Participant_ID) #nice.
+
+#total food derived reads??
+pdata <- data.frame(medi_abund_wilcox_phylum_wide, meta)
+wilcox.test(pdata$Total_Food_Reads~pdata$Diet2) #NS no trend
+wilcox.test(pdata$Total_Food_Reads~pdata$Diet3) #NS no trend
+wilcox.test(pdata$Total_Food_Reads~pdata$fever7d_aboveavg) #**p=0.040 #p=0.048
+
+wilcox.test(pdata$Total_Food_Reads_norm~pdata$Diet2) #NS no trend
+wilcox.test(pdata$Total_Food_Reads_norm~pdata$Diet3) #NS no trend
+wilcox.test(pdata$Total_Food_Reads_norm~pdata$fever7d_aboveavg) #p=0.085
+
+
+wilcox.test(pdata$Total_Food_relabund~pdata$Diet2) #NS no trend
+wilcox.test(pdata$Total_Food_relabund~pdata$Diet3) #NS no trend
+wilcox.test(pdata$Total_Food_relabund~pdata$fever7d_aboveavg) #*p=0.067 #p=0.10
+
+
+pdata <- pdata %>% filter(!is.na(fever7d_aboveavg))
+pdata$fever7d_aboveavg <- factor(pdata$fever7d_aboveavg, levels=c("lo", "hi"))
+
+wilcox.test(pdata$Total_Food_Reads~pdata$fever7d_aboveavg) 
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/Medi/plots/Fever_vs_TotalFoodReads_24.08.19.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=log(Total_Food_Reads), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + annotate('segment', x=1, xend=2, y=11, yend=11)
+p <- p + annotate('text', x=1.5, y=11.5, label="p=0.048")
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + scale_colour_manual(values=c("grey50", "firebrick3"))
+p <- p + xlab("Fever") + ylab("Log Food-Derived Reads") + theme(legend.position = "none")
+p
+#dev.off()
+
+wilcox.test(pdata$Total_Food_Reads_norm~pdata$fever7d_aboveavg) #p=0.085
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/Medi/plots/Fever_vs_TotalFoodReads_norm_24.08.19.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=log(Total_Food_Reads_norm), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + annotate('segment', x=1, xend=2, y=11, yend=11)
+p <- p + annotate('text', x=1.5, y=11.5, label="p=0.085")
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + scale_colour_manual(values=c("grey50", "firebrick3"))
+p <- p + xlab("Fever") + ylab("Log Food-Derived Per Sample") + theme(legend.position = "none")
+p
+#dev.off()
+
+wilcox.test(pdata$Total_Food_relabund~pdata$fever7d_aboveavg) #*p=0.067 #p=0.10
+
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/Medi/plots/Fever_vs_TotalFoodReads_relabund_24.08.19.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=Total_Food_relabund, colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + annotate('segment', x=1, xend=2, y=0.0015, yend=0.0015)
+p <- p + annotate('text', x=1.5, y=0.0016, label="p=0.10")
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + scale_colour_manual(values=c("grey50", "firebrick3"))
+p <- p + xlab("Fever") + ylab("Food-Derived Reads Rel. Abund.") + theme(legend.position = "none")
+p
+#dev.off()
+
+#vs plant/fungal (non animal) reads
+wilcox.test(pdata$reads_Streptophyta~pdata$fever7d_aboveavg) #p=0.1
+wilcox.test(pdata$reads_Basidiomycota~pdata$fever7d_aboveavg) #p=0.8
+wilcox.test(pdata$reads_StreptophytaBasidiomycota~pdata$fever7d_aboveavg) #p=0.050
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/1F.MediPlants.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=log(reads_StreptophytaBasidiomycota), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + annotate('segment', x=1, xend=2, y=11, yend=11)
+p <- p + annotate('text', x=1.5, y=11.5, label="p=0.050")
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + scale_colour_manual(values=c("grey50", "firebrick3"))
+p <- p + xlab("Fever") + ylab("Plant and Fungal DNA (Log Reads)") + theme(legend.position = "none")
+p
+#dev.off()
+
+wilcox.test(pdata$reads_normStreptophytaBasidiomycota~pdata$Diet2) #p=0.7
+wilcox.test(pdata$reads_normStreptophytaBasidiomycota~pdata$Diet3) #p=0.6
+wilcox.test(pdata$reads_normStreptophytaBasidiomycota~pdata$fever7d_aboveavg) #p=0.088
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/Medi/plots/Fever_vs_TotalPlantReads_norm_24.08.19.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=log(reads_normStreptophytaBasidiomycota), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + annotate('segment', x=1, xend=2, y=11, yend=11)
+p <- p + annotate('text', x=1.5, y=11.5, label="p=0.088")
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + scale_colour_manual(values=c("grey50", "firebrick3"))
+p <- p + xlab("Fever") + ylab("Plant and Fungal DNA (Log Reads)") + theme(legend.position = "none")
+p
+#dev.off()
+
+summary(lm(reads_StreptophytaBasidiomycota ~ fever7d_aboveavg, data=pdata))
+summary(lm(reads_StreptophytaBasidiomycota ~ Diet2 + fever7d_aboveavg, data=pdata))
+summary(lm(reads_StreptophytaBasidiomycota ~ Diet3 + fever7d_aboveavg, data=pdata))
+
+wilcox.test(pdata$relabund_StreptophytaBasidiomycota~pdata$fever7d_aboveavg) #p=0.063 #p=0.084
+
+summary(lm(relabund_StreptophytaBasidiomycota ~ fever7d_aboveavg, data=pdata))
+summary(lm(relabund_StreptophytaBasidiomycota ~ Diet2 + fever7d_aboveavg, data=pdata))
+summary(lm(relabund_StreptophytaBasidiomycota ~ Diet3 + fever7d_aboveavg, data=pdata)) #technically it's significant but..
+
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/Medi/plots/Fever_vs_TotalPlantReads_relabund_24.08.19.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=log(relabund_StreptophytaBasidiomycota), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0) + 
+  #annotate('segment', x=1, xend=2, y=11, yend=11) + 
+  #annotate('text', x=1.5, y=11.5, label="p=0.084") + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) + 
+  xlab("Fever") + ylab("Plant and Fungal DNA (Log Rel Abund)") + theme(legend.position = "none")
+p
+#dev.off()
+
+#vs animal reads
+wilcox.test(pdata$reads_Chordata~pdata$fever7d_aboveavg) #NS
+wilcox.test(pdata$relabund_Chordata~pdata$fever7d_aboveavg) #NS
+wilcox.test(pdata$relabund_Chordata~pdata$Diet2) #NS, p=0.1
+wilcox.test(pdata$relabund_Chordata~pdata$Diet3) #NS, p=0.3
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2D.MediAnimals.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=log(reads_Chordata), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + scale_colour_manual(values=c("grey50", "firebrick3"))
+p <- p + annotate('segment', x=1, xend=2, y=8.5, yend=8.5)
+p <- p + annotate('text', x=1.5, y=9, label="NS")
+p <- p + xlab("Fever") + ylab("Animal DNA (Log Reads)") + theme(legend.position = "none")
+p
+#dev.off()
+
+#same plots but by diet
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/Medi/plots/Diet2_vs_TotalFoodReads.pdf")
+p <- ggplot(pdata, aes(x=Diet2, y=log(Total_Food_Reads))) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + annotate('segment', x=1, xend=2, y=11, yend=11)
+p <- p + annotate('text', x=1.5, y=11.5, label="NS")
+p
+#dev.off()
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/Medi/plots/Diet2_vs_TotalAnimalReads.pdf")
+p <- ggplot(pdata, aes(x=Diet2, y=log(reads_Chordata))) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + annotate('segment', x=1, xend=2, y=11, yend=11)
+p <- p + annotate('text', x=1.5, y=11.5, label="NS")
+p
+#dev.off()
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/Medi/plots/Diet2_vs_TotalNonAnimalReads.pdf")
+p <- ggplot(pdata, aes(x=Diet2, y=log(StreptophytaBasidiomycota))) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + annotate('segment', x=1, xend=2, y=11, yend=11)
+p <- p + annotate('text', x=1.5, y=11.5, label="NS")
+p
+#dev.off()
+
+#total food derived reads already exists as a category given by medi #no it doesn't.
+total_food_reads <- medi_abund_wilcox %>% 
+  filter(sample_id %in% meta_seq$SampleID) %>% #keep only clean samples
+  group_by(Participant_ID, sample_id) %>% #not grouped by phylum, just all reads
+  summarize(reads=sum(reads, na.rm=TRUE), #first sum the categories by sample
+            relabund=sum(relative_abundance, na.rm=TRUE)) %>% 
+  group_by(Participant_ID) %>%
+  summarize(reads=sum(reads, na.rm=TRUE), #then sum or average by person over time 
+            relabund=mean(relabund, na.rm=TRUE)) 
+total_food_reads
+total_food_reads <- total_food_reads %>% full_join(meta)
+wilcox.test(total_food_reads$reads~total_food_reads$Diet2)
+wilcox.test(total_food_reads$reads~total_food_reads$fever7d_aboveavg) #p=0.055 so same as above
+wilcox.test(total_food_reads$relabund~total_food_reads$Diet2) #NS
+wilcox.test(total_food_reads$relabund~total_food_reads$Diet3) #NS
+wilcox.test(total_food_reads$relabund~total_food_reads$fever7d_aboveavg) #p=0.069
+
+
+total_nonfood_reads <- medi_abund_wilcox %>% 
+  filter(sample_id %in% meta_seq$SampleID) %>% #keep only clean samples
+  filter(!duplicated(sample_id)) %>% #and then make sure they are not duplicated by food
+  group_by(Participant_ID) %>% #but sum it up per person
+  summarize(total_raw_reads=sum(total_raw_reads),
+           bacteria_reads=sum(bacteria_reads),
+           human_reads=sum(human_reads))
+total_nonfood_reads
+
+total_nonfood_reads <- full_join(total_nonfood_reads, meta)
+pdata <- total_nonfood_reads %>% filter(!is.na(fever7d_aboveavg)&!is.na(Diet2))
+pdata$fever7d_aboveavg <- factor(pdata$fever7d_aboveavg, levels=c("lo", "hi"))
+
+wilcox.test(pdata$bacteria_reads~pdata$fever7d_aboveavg) #NS
+wilcox.test(pdata$human_reads~pdata$fever7d_aboveavg) #NS
+wilcox.test(pdata$total_raw_reads~pdata$fever7d_aboveavg) #NS
+
+#check in comparison the raw sequencing data from LLMGQC
+seqstats1 <- read.table("/ebio/abt3_projects2/uHEAT/data/output_QC/reports/final/seqkit_stats.tsv", header=TRUE) 
+seqstats2 <- read.table("/ebio/abt3_projects2/uHEAT/data/output_QC_pool3/reports/final/seqkit_stats.tsv", header=TRUE) 
+#pools 1-3 combined
+seqstats <- full_join(seqstats1, seqstats2)
+seqstats$sample_type <- seqstats$Sample
+seqstats[grep("blank", seqstats$sample_type),]$sample_type <- c("blank")
+seqstats[grep("mock", seqstats$sample_type),]$sample_type <- c("mock")
+seqstats$sample_type <- ifelse(seqstats$sample_type%in%(c("blank", "mock")),
+                               yes=seqstats$sample_type, no="feces")
+seqstats$sample_type
+seqstats$sample_no <- sapply(strsplit(seqstats$Sample,"_"), `[`, 2)
+seqstats$sample_type2 <- ifelse(seqstats$sample_type=="feces",
+                                yes=paste(seqstats$sample_type, seqstats$sample_no, sep=""),
+                                no=seqstats$sample_type)
+seqstats <- seqstats %>% filter(Read==1) #already done
+seqstats$num_seqs2 <- seqstats$num_seqs*2 #already done
+
+seqstats$Participant_ID <- sapply(strsplit(seqstats$Sample,"_"), `[`, 1)
+seqstats$Participant_ID <- gsub("H", "HEAT_", seqstats$Participant_ID)
+
+#summarize by participant over time, the same as I did for medi
+seq_sum <- seqstats %>% group_by(Participant_ID) %>%
+  summarize(num_seqs=sum(num_seqs2))
+
+#add metadata
+seqstats_meta <- full_join(seq_sum, meta_medi)
+
+#plot
+pdata <- seqstats_meta %>% filter(!is.na(fever7d_aboveavg)&!is.na(Diet2))
+pdata$fever7d_aboveavg <- factor(pdata$fever7d_aboveavg, levels=c("lo", "hi"))
+
+wilcox.test(pdata$num_seqs~pdata$fever7d_aboveavg) #p=0.71
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2F.TotalReadDepth.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=log(num_seqs), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + annotate('segment', x=1, xend=2, y=19.8, yend=19.8)
+p <- p + annotate('text', x=1.5, y=20, label="NS")
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + scale_colour_manual(values=c("grey50", "firebrick3"))
+p <- p + xlab("Fever") + ylab("Total Log Reads") + theme(legend.position = "none")
+p
+#dev.off()
+
+```
+
+```{r medi total food reads excluding hibiscus}
+#get rid of duplicated foods, clean up names #and exclude hibiscus!
+medi_abund_wilcox <- medi_abund %>% 
+  group_by(sample_id) %>% 
+  filter(!duplicated(species) & genus!="Hibiscus") #get rid of hibiscus for this estimate
+medi_abund_wilcox$wikipedia_id <- ifelse(medi_abund_wilcox$wikipedia_id=="", yes=medi_abund_wilcox$species, no=medi_abund_wilcox$wikipedia_id)
+
+#summarize total reads per phylum
+medi_abund_wilcox_phylum <- medi_abund_wilcox %>% 
+  #filter(sample_id %in% meta_seq$SampleID) %>% #keep only the clean samples - but because MEDI is sparse this is too strict
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  group_by(Participant_ID, sample_id, phylum) %>%
+  summarize(reads=sum(reads, na.rm=TRUE), #first sum the categories by sample
+            relabund=sum(relative_abundance, na.rm=TRUE)) %>% 
+  group_by(Participant_ID, phylum) %>%
+  summarize(reads=sum(reads, na.rm=TRUE), #then sum or average by person over time 
+            relabund=mean(relabund, na.rm=TRUE)) 
+medi_abund_wilcox_phylum
+
+#because some have no foods detected, give it a dummy food variable (abund=0)
+medi_abund_wilcox_phylum[which(medi_abund_wilcox_phylum$phylum==""),] #no abund
+medi_abund_wilcox_phylum[which(medi_abund_wilcox_phylum$phylum==""),]$phylum <- c("Streptophyta") #dummy variable for pivoting so that participant ID is retained; read count is still 0 
+
+#now add up the identical phyla so that it isn't duplicated
+medi_abund_wilcox_phylum <- medi_abund_wilcox_phylum %>%
+  group_by(Participant_ID, phylum) %>%
+  summarize(reads=sum(reads), relabund=sum(relabund))
+
+#also add # of samples per person as per earlier
+samples_per_person 
+
+#normalize
+medi_abund_wilcox_phylum_norm <- medi_abund_wilcox_phylum %>%
+  full_join(samples_per_person) %>%
+  filter(Participant_ID %in% meta_seq$Participant_ID)
+medi_abund_wilcox_phylum_norm$reads_norm <- medi_abund_wilcox_phylum_norm$reads / medi_abund_wilcox_phylum_norm$n #avg number per sample
+medi_abund_wilcox_phylum_norm
+
+
+#then, make it wide. 
+medi_abund_wilcox_phylum_wide <- medi_abund_wilcox_phylum_norm %>%
+  filter(phylum!="") %>%
+  pivot_wider(names_from=phylum, values_from=c(reads, relabund, reads_norm)) 
+medi_abund_wilcox_phylum_wide 
+dim(medi_abund_wilcox_phylum_wide) #171 participants
+
+#replace the NA with zeroes for no detection.
+medi_abund_wilcox_phylum_wide[is.na(medi_abund_wilcox_phylum_wide)] <- 0
+
+#add categories
+medi_abund_wilcox_phylum_wide$reads_StreptophytaBasidiomycota <- medi_abund_wilcox_phylum_wide$reads_Streptophyta + medi_abund_wilcox_phylum_wide$reads_Basidiomycota
+medi_abund_wilcox_phylum_wide$Total_Food_Reads <- medi_abund_wilcox_phylum_wide$reads_Chordata + medi_abund_wilcox_phylum_wide$reads_Streptophyta + medi_abund_wilcox_phylum_wide$reads_Basidiomycota
+
+medi_abund_wilcox_phylum_wide$reads_normStreptophytaBasidiomycota <- medi_abund_wilcox_phylum_wide$reads_norm_Streptophyta + medi_abund_wilcox_phylum_wide$reads_norm_Basidiomycota
+medi_abund_wilcox_phylum_wide$Total_Food_Reads_norm <- medi_abund_wilcox_phylum_wide$reads_norm_Chordata + medi_abund_wilcox_phylum_wide$reads_norm_Streptophyta + medi_abund_wilcox_phylum_wide$reads_norm_Basidiomycota
+
+medi_abund_wilcox_phylum_wide$relabund_StreptophytaBasidiomycota <- medi_abund_wilcox_phylum_wide$relabund_Streptophyta + medi_abund_wilcox_phylum_wide$relabund_Basidiomycota
+medi_abund_wilcox_phylum_wide$Total_Food_relabund <- medi_abund_wilcox_phylum_wide$relabund_Chordata + medi_abund_wilcox_phylum_wide$relabund_Streptophyta + medi_abund_wilcox_phylum_wide$relabund_Basidiomycota
+
+#write out this table for later correlation e.g. with somalogic data
+#write.csv(medi_abund_wilcox_phylum_wide, "/ebio/abt3_projects2/uHEAT/data/Medi/Medi_reads_per_sample_24.10.22.csv")
+
+#simple test.
+#medi_abund_wilcox_phylum_wide <- as.data.frame(medi_abund_wilcox_phylum_wide[,order(names(medi_abund_wilcox_phylum_wide))])
+#meta <- meta[order(meta$Participant_ID),]
+identical(medi_abund_wilcox_phylum_wide$Participant_ID, meta$Participant_ID) #nice.
+setdiff(medi_abund_wilcox_phylum_wide$Participant_ID, meta$Participant_ID)
+setdiff(meta$Participant_ID, medi_abund_wilcox_phylum_wide$Participant_ID)
+
+#total food derived reads??
+pdata <- full_join(medi_abund_wilcox_phylum_wide, meta)
+wilcox.test(pdata$Total_Food_Reads~pdata$Diet2) #NS no trend
+wilcox.test(pdata$Total_Food_Reads~pdata$Diet3) #NS no trend
+wilcox.test(pdata$Total_Food_Reads~pdata$fever7d_aboveavg) #*p=0.03
+
+wilcox.test(pdata$Total_Food_Reads_norm~pdata$Diet2) #NS no trend
+wilcox.test(pdata$Total_Food_Reads_norm~pdata$Diet3) #NS no trend
+wilcox.test(pdata$Total_Food_Reads_norm~pdata$fever7d_aboveavg) #p=0.05
+
+
+wilcox.test(pdata$Total_Food_relabund~pdata$Diet2) #NS no trend
+wilcox.test(pdata$Total_Food_relabund~pdata$Diet3) #NS no trend
+wilcox.test(pdata$Total_Food_relabund~pdata$fever7d_aboveavg) #p=0.14
+
+
+pdata <- pdata %>% filter(!is.na(fever7d_aboveavg))
+pdata$fever7d_aboveavg <- factor(pdata$fever7d_aboveavg, levels=c("lo", "hi"))
+
+wilcox.test(pdata$Total_Food_Reads~pdata$fever7d_aboveavg) 
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/Medi/plots/Fever_vs_TotalFoodReads_24.08.19.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=log(Total_Food_Reads), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + annotate('segment', x=1, xend=2, y=11, yend=11)
+p <- p + annotate('text', x=1.5, y=11.5, label="p=0.048")
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + scale_colour_manual(values=c("grey50", "firebrick3"))
+p <- p + xlab("Fever") + ylab("Log Food-Derived Reads") + theme(legend.position = "none")
+p
+#dev.off()
+
+wilcox.test(pdata$Total_Food_Reads_norm~pdata$fever7d_aboveavg) #p=0.085
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/Medi/plots/Fever_vs_TotalFoodReads_norm_24.08.19.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=log(Total_Food_Reads_norm), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + annotate('segment', x=1, xend=2, y=11, yend=11)
+p <- p + annotate('text', x=1.5, y=11.5, label="p=0.085")
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + scale_colour_manual(values=c("grey50", "firebrick3"))
+p <- p + xlab("Fever") + ylab("Log Food-Derived Per Sample") + theme(legend.position = "none")
+p
+#dev.off()
+
+wilcox.test(pdata$Total_Food_relabund~pdata$fever7d_aboveavg) #*p=0.067 #p=0.10
+
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/Medi/plots/Fever_vs_TotalFoodReads_relabund_24.08.19.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=Total_Food_relabund, colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + annotate('segment', x=1, xend=2, y=0.0015, yend=0.0015)
+p <- p + annotate('text', x=1.5, y=0.0016, label="p=0.10")
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + scale_colour_manual(values=c("grey50", "firebrick3"))
+p <- p + xlab("Fever") + ylab("Food-Derived Reads Rel. Abund.") + theme(legend.position = "none")
+p
+#dev.off()
+
+#vs plant/fungal (non animal) reads
+wilcox.test(pdata$reads_Streptophyta~pdata$fever7d_aboveavg) #p=0.1
+wilcox.test(pdata$reads_Basidiomycota~pdata$fever7d_aboveavg) #p=0.8
+wilcox.test(pdata$reads_StreptophytaBasidiomycota~pdata$fever7d_aboveavg) #p=0.050
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/1F.MediPlants.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=log(reads_StreptophytaBasidiomycota), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + annotate('segment', x=1, xend=2, y=11, yend=11)
+p <- p + annotate('text', x=1.5, y=11.5, label="p=0.050")
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + scale_colour_manual(values=c("grey50", "firebrick3"))
+p <- p + xlab("Fever") + ylab("Plant and Fungal DNA (Log Reads)") + theme(legend.position = "none")
+p
+#dev.off()
+
+wilcox.test(pdata$reads_normStreptophytaBasidiomycota~pdata$Diet2) #p=0.7
+wilcox.test(pdata$reads_normStreptophytaBasidiomycota~pdata$Diet3) #p=0.6
+wilcox.test(pdata$reads_normStreptophytaBasidiomycota~pdata$fever7d_aboveavg) #p=0.088
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/Medi/plots/Fever_vs_TotalPlantReads_norm_24.08.19.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=log(reads_normStreptophytaBasidiomycota), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + annotate('segment', x=1, xend=2, y=11, yend=11)
+p <- p + annotate('text', x=1.5, y=11.5, label="p=0.088")
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + scale_colour_manual(values=c("grey50", "firebrick3"))
+p <- p + xlab("Fever") + ylab("Plant and Fungal DNA (Log Reads)") + theme(legend.position = "none")
+p
+#dev.off()
+
+summary(lm(reads_StreptophytaBasidiomycota ~ fever7d_aboveavg, data=pdata))
+summary(lm(reads_StreptophytaBasidiomycota ~ Diet2 + fever7d_aboveavg, data=pdata))
+summary(lm(reads_StreptophytaBasidiomycota ~ Diet3 + fever7d_aboveavg, data=pdata))
+
+wilcox.test(pdata$relabund_StreptophytaBasidiomycota~pdata$fever7d_aboveavg) #p=0.063 #p=0.084
+
+summary(lm(relabund_StreptophytaBasidiomycota ~ fever7d_aboveavg, data=pdata))
+summary(lm(relabund_StreptophytaBasidiomycota ~ Diet2 + fever7d_aboveavg, data=pdata))
+summary(lm(relabund_StreptophytaBasidiomycota ~ Diet3 + fever7d_aboveavg, data=pdata)) #technically it's significant but..
+
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/Medi/plots/Fever_vs_TotalPlantReads_relabund_24.08.19.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=log(relabund_StreptophytaBasidiomycota), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0) + 
+  #annotate('segment', x=1, xend=2, y=11, yend=11) + 
+  #annotate('text', x=1.5, y=11.5, label="p=0.084") + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) + 
+  xlab("Fever") + ylab("Plant and Fungal DNA (Log Rel Abund)") + theme(legend.position = "none")
+p
+#dev.off()
+
+#vs animal reads
+wilcox.test(pdata$reads_Chordata~pdata$fever7d_aboveavg) #NS
+wilcox.test(pdata$relabund_Chordata~pdata$fever7d_aboveavg) #NS
+wilcox.test(pdata$relabund_Chordata~pdata$Diet2) #NS, p=0.1
+wilcox.test(pdata$relabund_Chordata~pdata$Diet3) #NS, p=0.3
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2D.MediAnimals.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=log(reads_Chordata), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + scale_colour_manual(values=c("grey50", "firebrick3"))
+p <- p + annotate('segment', x=1, xend=2, y=8.5, yend=8.5)
+p <- p + annotate('text', x=1.5, y=9, label="NS")
+p <- p + xlab("Fever") + ylab("Animal DNA (Log Reads)") + theme(legend.position = "none")
+p
+#dev.off()
+
+#same plots but by diet
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/Medi/plots/Diet2_vs_TotalFoodReads.pdf")
+p <- ggplot(pdata, aes(x=Diet2, y=log(Total_Food_Reads))) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + annotate('segment', x=1, xend=2, y=11, yend=11)
+p <- p + annotate('text', x=1.5, y=11.5, label="NS")
+p
+#dev.off()
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/Medi/plots/Diet2_vs_TotalAnimalReads.pdf")
+p <- ggplot(pdata, aes(x=Diet2, y=log(reads_Chordata))) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + annotate('segment', x=1, xend=2, y=11, yend=11)
+p <- p + annotate('text', x=1.5, y=11.5, label="NS")
+p
+#dev.off()
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/Medi/plots/Diet2_vs_TotalNonAnimalReads.pdf")
+p <- ggplot(pdata, aes(x=Diet2, y=log(StreptophytaBasidiomycota))) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + annotate('segment', x=1, xend=2, y=11, yend=11)
+p <- p + annotate('text', x=1.5, y=11.5, label="NS")
+p
+#dev.off()
+
+#total food derived reads already exists as a category given by medi #no it doesn't.
+total_food_reads <- medi_abund_wilcox %>% 
+  filter(sample_id %in% meta_seq$SampleID) %>% #keep only clean samples
+  group_by(Participant_ID, sample_id) %>% #not grouped by phylum, just all reads
+  summarize(reads=sum(reads, na.rm=TRUE), #first sum the categories by sample
+            relabund=sum(relative_abundance, na.rm=TRUE)) %>% 
+  group_by(Participant_ID) %>%
+  summarize(reads=sum(reads, na.rm=TRUE), #then sum or average by person over time 
+            relabund=mean(relabund, na.rm=TRUE)) 
+total_food_reads
+total_food_reads <- total_food_reads %>% full_join(meta)
+wilcox.test(total_food_reads$reads~total_food_reads$Diet2)
+wilcox.test(total_food_reads$reads~total_food_reads$fever7d_aboveavg) #p=0.055 so same as above
+wilcox.test(total_food_reads$relabund~total_food_reads$Diet2) #NS
+wilcox.test(total_food_reads$relabund~total_food_reads$Diet3) #NS
+wilcox.test(total_food_reads$relabund~total_food_reads$fever7d_aboveavg) #p=0.069
+
+
+total_nonfood_reads <- medi_abund_wilcox %>% 
+  filter(sample_id %in% meta_seq$SampleID) %>% #keep only clean samples
+  filter(!duplicated(sample_id)) %>% #and then make sure they are not duplicated by food
+  group_by(Participant_ID) %>% #but sum it up per person
+  summarize(total_raw_reads=sum(total_raw_reads),
+           bacteria_reads=sum(bacteria_reads),
+           human_reads=sum(human_reads))
+total_nonfood_reads
+
+total_nonfood_reads <- full_join(total_nonfood_reads, meta)
+pdata <- total_nonfood_reads %>% filter(!is.na(fever7d_aboveavg)&!is.na(Diet2))
+pdata$fever7d_aboveavg <- factor(pdata$fever7d_aboveavg, levels=c("lo", "hi"))
+
+wilcox.test(pdata$bacteria_reads~pdata$fever7d_aboveavg) #NS
+wilcox.test(pdata$human_reads~pdata$fever7d_aboveavg) #NS
+wilcox.test(pdata$total_raw_reads~pdata$fever7d_aboveavg) #NS
+
+#check in comparison the raw sequencing data from LLMGQC
+seqstats1 <- read.table("/ebio/abt3_projects2/uHEAT/data/output_QC/reports/final/seqkit_stats.tsv", header=TRUE) 
+seqstats2 <- read.table("/ebio/abt3_projects2/uHEAT/data/output_QC_pool3/reports/final/seqkit_stats.tsv", header=TRUE) 
+#pools 1-3 combined
+seqstats <- full_join(seqstats1, seqstats2)
+seqstats$sample_type <- seqstats$Sample
+seqstats[grep("blank", seqstats$sample_type),]$sample_type <- c("blank")
+seqstats[grep("mock", seqstats$sample_type),]$sample_type <- c("mock")
+seqstats$sample_type <- ifelse(seqstats$sample_type%in%(c("blank", "mock")),
+                               yes=seqstats$sample_type, no="feces")
+seqstats$sample_type
+seqstats$sample_no <- sapply(strsplit(seqstats$Sample,"_"), `[`, 2)
+seqstats$sample_type2 <- ifelse(seqstats$sample_type=="feces",
+                                yes=paste(seqstats$sample_type, seqstats$sample_no, sep=""),
+                                no=seqstats$sample_type)
+seqstats <- seqstats %>% filter(Read==1) #already done
+seqstats$num_seqs2 <- seqstats$num_seqs*2 #already done
+
+seqstats$Participant_ID <- sapply(strsplit(seqstats$Sample,"_"), `[`, 1)
+seqstats$Participant_ID <- gsub("H", "HEAT_", seqstats$Participant_ID)
+
+#summarize by participant over time, the same as I did for medi
+seq_sum <- seqstats %>% group_by(Participant_ID) %>%
+  summarize(num_seqs=sum(num_seqs2))
+
+#add metadata
+seqstats_meta <- full_join(seq_sum, meta_medi)
+
+#plot
+pdata <- seqstats_meta %>% filter(!is.na(fever7d_aboveavg)&!is.na(Diet2))
+pdata$fever7d_aboveavg <- factor(pdata$fever7d_aboveavg, levels=c("lo", "hi"))
+
+wilcox.test(pdata$num_seqs~pdata$fever7d_aboveavg) #p=0.71
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2F.TotalReadDepth.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=log(num_seqs), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + annotate('segment', x=1, xend=2, y=19.8, yend=19.8)
+p <- p + annotate('text', x=1.5, y=20, label="NS")
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + scale_colour_manual(values=c("grey50", "firebrick3"))
+p <- p + xlab("Fever") + ylab("Total Log Reads") + theme(legend.position = "none")
+p
+#dev.off()
+
+```
+
+
+```{r total food reads vs waltera}
+#per sample waltera abundance
+waltera <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/Rscripts_server/maaslin2_input/waltera_abundance.csv", row.names=1)
+waltera <- waltera %>% filter(SampleID %in% meta_seq$SampleID)
+
+#total food reads per sample
+medi_persample <- medi_abund_wilcox %>% 
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  group_by(sample_id, phylum) %>%
+  summarize( #first sum the categories by sample
+            relabund=sum(relative_abundance, na.rm=TRUE))
+medi_persample
+
+medi_persample$phylum <- ifelse(medi_persample$phylum=="", yes="Streptophyta", n=medi_persample$phylum) #dummy phylum
+
+medi_persample <- medi_persample %>% pivot_wider(names_from=phylum, values_from=relabund)
+medi_persample[is.na(medi_persample)] <- 0 #fill in zeroes
+
+#categorize
+medi_persample <- medi_persample %>%
+  mutate(Plants=Streptophyta + Basidiomycota,
+         TotalFood=Streptophyta + Chordata + Basidiomycota)
+
+#correlate.
+waltera_medi <- full_join(waltera, medi_persample, by=c('SampleID'='sample_id')) %>% filter(!is.na(Acetatifactor))
+
+p <- ggplot(waltera_medi, aes(x=log(TotalFood), y=log(Acetatifactor))) + geom_point() + geom_smooth(method='lm')
+p
+cor.test(waltera_medi$TotalFood, waltera_medi$Acetatifactor, method='spearman') #sig but not in the direction I expected...
+cor.test(waltera_medi$Plants, waltera_medi$Acetatifactor, method='spearman') #sig but not in the direction I expected...
+cor.test(waltera_medi$Chordata, waltera_medi$Acetatifactor, method='spearman') #NS
+
+#check properly
+m <- lme(Acetatifactor~TotalFood, data=waltera_medi, random= ~ 1|Participant_ID) #NS #log transform not allowed NA
+summary(m) #NS once accounting for participant ID
+
+#what if we excluded Hibiscus as a presumable 'non food'.
+#total food reads per sample
+medi_persample_nohibiscus <- medi_abund_wilcox %>%
+  filter(genus!="Hibiscus") %>% #no hibiscus
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  group_by(sample_id, phylum) %>%
+  summarize( #first sum the categories by sample
+            relabund=sum(relative_abundance, na.rm=TRUE))
+medi_persample_nohibiscus
+
+medi_persample_nohibiscus$phylum <- ifelse(medi_persample_nohibiscus$phylum=="", yes="Streptophyta", n=medi_persample_nohibiscus$phylum) #dummy phylum
+medi_persample_nohibiscus <- medi_persample_nohibiscus %>% pivot_wider(names_from=phylum, values_from=relabund)
+medi_persample_nohibiscus[is.na(medi_persample_nohibiscus)] <- 0 #fill in zeroes
+
+medi_persample_nohibiscus <- medi_persample_nohibiscus %>%
+  mutate(Plants=Streptophyta + Basidiomycota,
+         TotalFood=Streptophyta + Chordata + Basidiomycota)
+
+#correlate.
+waltera_medi <- full_join(waltera, medi_persample_nohibiscus, by=c('SampleID'='sample_id'))
+
+p <- ggplot(waltera_medi, aes(x=log(TotalFood), y=log(Acetatifactor))) + geom_point() + geom_smooth(method='lm')
+p
+cor.test(waltera_medi$TotalFood, waltera_medi$Acetatifactor, method='spearman') #correlation is still pos., just less strong
+
+```
+
+
+```{r medi total food reads baseline only}
+
+#get rid of duplicated foods, clean up names
+medi_abund_wilcox <- medi_abund %>% 
+  group_by(sample_id) %>% 
+  filter(!duplicated(species))
+medi_abund_wilcox$wikipedia_id <- ifelse(medi_abund_wilcox$wikipedia_id=="", yes=medi_abund_wilcox$species, no=medi_abund_wilcox$wikipedia_id)
+
+#summarize total reads per phylum
+medi_abund_wilcox_phylum <- medi_abund_wilcox %>% 
+  #filter(sample_id %in% meta_seq$SampleID) %>% #keep only the clean samples - but because MEDI is sparse this is too strict
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  filter(sample_id %in% meta_seq[which(meta_seq$Stool_timing3=="before"),]$SampleID) %>% #only baseline samples
+  group_by(Participant_ID, sample_id, phylum) %>%
+  summarize(reads=sum(reads, na.rm=TRUE), #first sum the categories by sample
+            relabund=sum(relative_abundance, na.rm=TRUE)) %>% 
+  group_by(Participant_ID, phylum) %>%
+  summarize(reads=sum(reads, na.rm=TRUE), #then sum or average by person over time 
+            relabund=mean(relabund, na.rm=TRUE))
+medi_abund_wilcox_phylum
+
+#there will now be several participants without any info, correct?
+ids <- dplyr::count(medi_abund_wilcox_phylum, Participant_ID) 
+length(ids$n) #oh no actually it's okay.
+
+#because H017 has no foods detected, give it a dummy food variable (abund=0)
+medi_abund_wilcox_phylum[which(medi_abund_wilcox_phylum$Participant_ID=="HEAT_017"),] #no abund
+medi_abund_wilcox_phylum[which(medi_abund_wilcox_phylum$Participant_ID=="HEAT_017"),]$phylum <- c("Streptophyta") #dummy variable for pivoting so that H017 is retained
+
+#also add # of samples per person as per earlier
+samples_per_person_baseline
+
+#normalize
+medi_abund_wilcox_phylum_norm <- medi_abund_wilcox_phylum %>%
+  full_join(samples_per_person_baseline) %>%
+  filter(Participant_ID %in% meta_seq$Participant_ID)
+medi_abund_wilcox_phylum_norm$reads_norm <- medi_abund_wilcox_phylum_norm$reads / medi_abund_wilcox_phylum_norm$n #avg number per sample
+medi_abund_wilcox_phylum_norm
+
+#then, make it wide. 
+medi_abund_wilcox_phylum_wide <- medi_abund_wilcox_phylum_norm %>%
+  filter(phylum!="") %>%
+  pivot_wider(names_from=phylum, values_from=c(reads, relabund, reads_norm)) 
+medi_abund_wilcox_phylum_wide 
+dim(medi_abund_wilcox_phylum_wide) #but this still excludes too many undetectable samples; 167 ppl now
+
+#some samples are missing because no foods detected.!
+#merge...
+medi_abund_wilcox_phylum_wide_meta <- full_join(medi_abund_wilcox_phylum_wide, meta)
+#unmerge...
+medi_abund_wilcox_phylum_wide <- medi_abund_wilcox_phylum_wide_meta[,c(1:length(names(medi_abund_wilcox_phylum_wide)))]
+#check...
+meta <- meta[order(meta$Participant_ID),]
+medi_abund_wilcox_phylum_wide <- medi_abund_wilcox_phylum_wide[order(medi_abund_wilcox_phylum_wide$Participant_ID),]
+identical(medi_abund_wilcox_phylum_wide$Participant_ID, meta$Participant_ID) #nice.
+
+#replace the NA with zeroes for no detection.
+medi_abund_wilcox_phylum_wide[is.na(medi_abund_wilcox_phylum_wide)] <- 0
+
+
+#total food derived reads??
+pdata <- data.frame(medi_abund_wilcox_phylum_wide, meta)
+pdata$reads_StreptophytaBasidiomycota <- pdata$reads_Streptophyta + pdata$reads_Basidiomycota
+pdata$Total_Food_Reads <- pdata$reads_Chordata + pdata$reads_Streptophyta + pdata$reads_Basidiomycota
+wilcox.test(pdata$Total_Food_Reads~pdata$Diet2) #NS no trend
+wilcox.test(pdata$Total_Food_Reads~pdata$Diet3) #NS no trend
+wilcox.test(pdata$Total_Food_Reads~pdata$fever7d_aboveavg) #p=0.19 baseline
+
+pdata$reads_normStreptophytaBasidiomycota <- pdata$reads_norm_Streptophyta + pdata$reads_norm_Basidiomycota
+pdata$Total_Food_Reads_norm <- pdata$reads_norm_Chordata + pdata$reads_norm_Streptophyta + pdata$reads_norm_Basidiomycota
+wilcox.test(pdata$Total_Food_Reads_norm~pdata$Diet2) #NS no trend
+wilcox.test(pdata$Total_Food_Reads_norm~pdata$Diet2) #NS no trend
+wilcox.test(pdata$Total_Food_Reads_norm~pdata$fever7d_aboveavg) #p=0.2 baseline
+
+pdata$relabund_StreptophytaBasidiomycota <- pdata$relabund_Streptophyta + pdata$relabund_Basidiomycota
+pdata$Total_Food_relabund <- pdata$relabund_Chordata + pdata$relabund_Streptophyta + pdata$relabund_Basidiomycota
+wilcox.test(pdata$Total_Food_relabund~pdata$Diet2) #NS no trend
+wilcox.test(pdata$Total_Food_relabund~pdata$fever7d_aboveavg) #p=0.2 baseline
+
+#write out this table for later correlation e.g. with somalogic data
+#write.csv(pdata, "/ebio/abt3_projects2/uHEAT/data/Medi/Medi_reads_per_sample_24.08.19.csv")
+
+#vs plant/fungal (non animal) reads
+wilcox.test(pdata$reads_Streptophyta~pdata$fever7d_aboveavg) #p=0.1
+wilcox.test(pdata$reads_Basidiomycota~pdata$fever7d_aboveavg) #p=0.8
+wilcox.test(pdata$reads_StreptophytaBasidiomycota~pdata$fever7d_aboveavg) #p=0.1
+
+wilcox.test(pdata$relabund_StreptophytaBasidiomycota~pdata$fever7d_aboveavg) #p=0.2
+wilcox.test(pdata$relabund_StreptophytaBasidiomycota~pdata$Diet2) #p=0.3
+wilcox.test(pdata$relabund_StreptophytaBasidiomycota~pdata$Diet3) #p=0.4
+
+```
+
+```{r medi total food reads postvaccine only}
+
+#get rid of duplicated foods, clean up names
+medi_abund_wilcox <- medi_abund %>% 
+  group_by(sample_id) %>% 
+  filter(!duplicated(species))
+medi_abund_wilcox$wikipedia_id <- ifelse(medi_abund_wilcox$wikipedia_id=="", yes=medi_abund_wilcox$species, no=medi_abund_wilcox$wikipedia_id)
+
+#summarize total reads per phylum
+medi_abund_wilcox_phylum <- medi_abund_wilcox %>% 
+  #filter(sample_id %in% meta_seq$SampleID) %>% #keep only the clean samples - but because MEDI is sparse this is too strict
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  filter(sample_id %in% meta_seq[which(meta_seq$Stool_timing3=="after"),]$SampleID) %>% #only after samples
+  group_by(Participant_ID, sample_id, phylum) %>%
+  summarize(reads=sum(reads, na.rm=TRUE), #first sum the categories by sample
+            relabund=sum(relative_abundance, na.rm=TRUE)) %>% 
+  group_by(Participant_ID, phylum) %>%
+  summarize(reads=sum(reads, na.rm=TRUE), #then sum or average by person over time 
+            relabund=mean(relabund, na.rm=TRUE))
+medi_abund_wilcox_phylum
+
+#there will now be several participants without any info, correct?
+ids <- dplyr::count(medi_abund_wilcox_phylum, Participant_ID) 
+length(ids$n) #oh no actually it's okay.
+
+#because H017 has no foods detected, give it a dummy food variable (abund=0)
+medi_abund_wilcox_phylum[which(medi_abund_wilcox_phylum$Participant_ID=="HEAT_017"),] #no abund
+medi_abund_wilcox_phylum[which(medi_abund_wilcox_phylum$Participant_ID=="HEAT_017"),]$phylum <- c("Streptophyta") #dummy variable for pivoting so that H017 is retained
+
+#also add # of samples per person as per earlier - except now after instead of before
+samples_per_person_post <- medi_abund %>% filter(!duplicated(sample_id)) %>%
+  filter(sample_id %in% meta_seq[which(meta_seq$Stool_timing3=="after"),]$SampleID) %>% #only baseline samples
+  count(Participant_ID) %>% as.data.frame()
+samples_per_person_post
+
+#normalize
+medi_abund_wilcox_phylum_norm <- medi_abund_wilcox_phylum %>%
+  full_join(samples_per_person_baseline) %>%
+  filter(Participant_ID %in% meta_seq$Participant_ID)
+medi_abund_wilcox_phylum_norm$reads_norm <- medi_abund_wilcox_phylum_norm$reads / medi_abund_wilcox_phylum_norm$n #avg number per sample
+medi_abund_wilcox_phylum_norm
+
+#then, make it wide. 
+medi_abund_wilcox_phylum_wide <- medi_abund_wilcox_phylum_norm %>%
+  filter(phylum!="") %>%
+  pivot_wider(names_from=phylum, values_from=c(reads, relabund, reads_norm)) 
+medi_abund_wilcox_phylum_wide 
+dim(medi_abund_wilcox_phylum_wide) #but this still excludes too many undetectable samples; 167 ppl now
+
+#some samples are missing because no foods detected.!
+#merge...
+medi_abund_wilcox_phylum_wide_meta <- full_join(medi_abund_wilcox_phylum_wide, meta)
+#unmerge...
+medi_abund_wilcox_phylum_wide <- medi_abund_wilcox_phylum_wide_meta[,c(1:length(names(medi_abund_wilcox_phylum_wide)))]
+#check...
+meta <- meta[order(meta$Participant_ID),]
+medi_abund_wilcox_phylum_wide <- medi_abund_wilcox_phylum_wide[order(medi_abund_wilcox_phylum_wide$Participant_ID),]
+identical(medi_abund_wilcox_phylum_wide$Participant_ID, meta$Participant_ID) #nice.
+
+#replace the NA with zeroes for no detection.
+medi_abund_wilcox_phylum_wide[is.na(medi_abund_wilcox_phylum_wide)] <- 0
+
+#total food derived reads??
+pdata <- data.frame(medi_abund_wilcox_phylum_wide, meta)
+pdata$reads_StreptophytaBasidiomycota <- pdata$reads_Streptophyta + pdata$reads_Basidiomycota
+pdata$Total_Food_Reads <- pdata$reads_Chordata + pdata$reads_Streptophyta + pdata$reads_Basidiomycota
+wilcox.test(pdata$Total_Food_Reads~pdata$Diet2) #NS no trend
+wilcox.test(pdata$Total_Food_Reads~pdata$Diet3) #NS no trend
+wilcox.test(pdata$Total_Food_Reads~pdata$fever7d_aboveavg) #NS no trend
+
+pdata$reads_normStreptophytaBasidiomycota <- pdata$reads_norm_Streptophyta + pdata$reads_norm_Basidiomycota
+pdata$Total_Food_Reads_norm <- pdata$reads_norm_Chordata + pdata$reads_norm_Streptophyta + pdata$reads_norm_Basidiomycota
+wilcox.test(pdata$Total_Food_Reads_norm~pdata$Diet2) #NS no trend
+wilcox.test(pdata$Total_Food_Reads_norm~pdata$Diet2) #NS no trend
+wilcox.test(pdata$Total_Food_Reads_norm~pdata$fever7d_aboveavg) #NS no trend
+
+pdata$relabund_StreptophytaBasidiomycota <- pdata$relabund_Streptophyta + pdata$relabund_Basidiomycota
+pdata$Total_Food_relabund <- pdata$relabund_Chordata + pdata$relabund_Streptophyta + pdata$relabund_Basidiomycota
+wilcox.test(pdata$Total_Food_relabund~pdata$Diet2) #NS no trend
+wilcox.test(pdata$Total_Food_relabund~pdata$fever7d_aboveavg) #NS no trend
+
+#write out this table for later correlation e.g. with somalogic data
+#write.csv(pdata, "/ebio/abt3_projects2/uHEAT/data/Medi/Medi_reads_per_sample_24.08.19.csv")
+
+#vs plant/fungal (non animal) reads
+wilcox.test(pdata$reads_Streptophyta~pdata$fever7d_aboveavg) #p=0.1
+wilcox.test(pdata$reads_Basidiomycota~pdata$fever7d_aboveavg) #p=0.8
+wilcox.test(pdata$reads_StreptophytaBasidiomycota~pdata$fever7d_aboveavg) #p=0.1
+
+wilcox.test(pdata$relabund_StreptophytaBasidiomycota~pdata$fever7d_aboveavg) #p=0.2
+wilcox.test(pdata$relabund_StreptophytaBasidiomycota~pdata$Diet2) #p=0.3
+wilcox.test(pdata$relabund_StreptophytaBasidiomycota~pdata$Diet3) #p=0.4
+
+```
+
+
+
+```{r medi foods and nutrients vs waltera per sample}
+#per sample waltera abundance
+waltera <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/Rscripts_server/maaslin2_input/waltera_abundance.csv", row.names=1)
+waltera <- waltera %>% filter(SampleID %in% meta_seq$SampleID)
+
+#per sample medi 
+medi_abund_wilcox <- medi_abund %>% group_by(sample_id) %>% filter(!duplicated(species))
+medi_abund_wilcox$wikipedia_id <- ifelse(medi_abund_wilcox$wikipedia_id=="", yes=medi_abund_wilcox$species, no=medi_abund_wilcox$wikipedia_id)
+
+medi_abund_wilcox_foodname <- medi_abund_wilcox %>% 
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  group_by(sample_id, wikipedia_id) %>%
+  dplyr::summarize(relative_abundance=sum(relative_abundance)) # sum the categories by sample
+medi_abund_wilcox_foodname
+
+#join it with the waltera table to gain back the no-detection samples
+medi_abund_wilcox_foodname <- medi_abund_wilcox_foodname %>% full_join(waltera, by=c("sample_id"="SampleID"))
+medi_abund_wilcox_foodname$wikipedia_id <- ifelse(medi_abund_wilcox_foodname$wikipedia_id=="", 
+                                                  yes="Oat", 
+                                                  no=medi_abund_wilcox_foodname$wikipedia_id)  #dummy food
+medi_abund_wilcox_foodname$relative_abundance <- ifelse(is.na(medi_abund_wilcox_foodname$relative_abundance),
+                                                        0, medi_abund_wilcox_foodname$relative_abundance) #dummy food is 0 abundant
+
+
+#then, make it wide. 
+medi_abund_wilcox_foodname_wide <- medi_abund_wilcox_foodname %>%
+  dplyr::select(-c(Acetatifactor, Participant_ID)) %>%
+  pivot_wider(names_from=wikipedia_id, values_from=relative_abundance) 
+medi_abund_wilcox_foodname_wide 
+dim(medi_abund_wilcox_foodname_wide) #147 different foods in 964 samples
+
+medi_abund_wilcox_foodname_wide <- medi_abund_wilcox_foodname_wide %>% filter(sample_id %in% waltera$SampleID)
+waltera <- waltera[order(waltera$SampleID),]
+medi_abund_wilcox_foodname_wide <- medi_abund_wilcox_foodname_wide[order(medi_abund_wilcox_foodname_wide$sample_id),]
+
+medi_abund_wilcox <- as.data.frame(medi_abund_wilcox_foodname_wide)
+row.names(medi_abund_wilcox) <- medi_abund_wilcox$sample_id
+medi_abund_wilcox$sample_id <- NULL
+medi_abund_wilcox_t <- as.data.frame(t(medi_abund_wilcox))
+dim(medi_abund_wilcox_t) #1022 samples in columns, 146 nutrients in rows
+#replace the NA with zeroes for no detection.
+medi_abund_wilcox[is.na(medi_abund_wilcox)] <- 0 
+medi_abund_wilcox_t[is.na(medi_abund_wilcox_t)] <- 0
+
+identical(row.names(medi_abund_wilcox), waltera$SampleID)
+
+#multiple spearmans (STATISTICALLY QUESTIONABLE) - Waltera by Foods
+SP.p = apply(medi_abund_wilcox_t,1,
+             function(x) cor.test(c(x), waltera$Acetatifactor, method='spearman')$p.value)
+SP.coef = apply(medi_abund_wilcox_t,1,
+                function(x) cor.test(c(x), waltera$Acetatifactor, method='spearman')$estimate)
+pres <- data.frame(SampleID=names(SP.p), pval=SP.p, coef=SP.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+head(pres[order(pres$pval),]) 
+#it's very very strongly correlated with Roselle. Is that an indication of processed foods?
+
+pdata <- data.frame(medi_abund_wilcox, waltera)
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/plots4/WalteraVSHibiscus.pdf" )
+p <- ggplot(pdata, aes(x=log(Acetatifactor), y=log(Roselle_.plant.))) + 
+  geom_point() + 
+  geom_smooth(method='lm') +
+  theme_bw() +
+  xlab("Waltera (Log Abund.)") + ylab("Putative Cotton DNA (Log Abund.)") +
+  annotate('text', x=-8.5, y=-9, label=c('q=1.5e-15\nrho=0.26'))
+p
+#dev.off()
+#OK, well. I mean it's not THAT impressive.
+#BUT could the Roselle be the cotton, AKA the artificial carboxymethylcellulose??
+#could we try re-classifying somehow??
+
+#check properly via mixed linear model
+library(nlme)
+m <- lme(Roselle_.plant.~Acetatifactor, data=pdata, random= ~ 1|Participant_ID) #NS #log transform not allowed NA
+summary(m) #not significant done properly..
+
+#summarized each per person?
+pdata1 <- pdata %>%
+  group_by(Participant_ID) %>%
+  dplyr::summarize(Roselle=mean(Roselle_.plant.), Waltera=mean(Acetatifactor))
+cor.test(pdata1$Roselle, pdata1$Waltera, method='spearman') #rho=0.36, p=1.1e-06
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/plots4/WalteraVSHibiscus.pdf" )
+p <- ggplot(pdata1, aes(x=log(Waltera), y=log(Roselle))) + 
+  geom_point() + 
+  geom_smooth(method='lm') +
+  theme_bw() +
+  xlab("Waltera (Log Abund.)") + ylab("Putative Cotton DNA (Log Abund.)") 
+  #annotate('text', x=-8.5, y=-9, label=c('q=1.5e-15\nrho=0.26'))
+p
+#dev.off()
+
+
+#does Rosella abundance change by fever or diet? I already checked, didn't I?
+meta_seq <- meta_seq[order(meta_seq$SampleID),]
+identical(row.names(medi_abund_wilcox), meta_seq$SampleID)
+pdata1 <- data.frame(medi_abund_wilcox, meta_seq) %>%
+  group_by(Participant_ID, fever7d_aboveavg, Diet2) %>%
+  dplyr::summarize(Roselle=mean(Roselle_.plant.))
+ggplot(pdata1, aes(x=fever7d_aboveavg, y=Roselle)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+wilcox.test(pdata1$Roselle~pdata1$fever7d_aboveavg) #NS
+
+ggplot(pdata1, aes(x=Diet2, y=Roselle)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+wilcox.test(pdata1$Roselle~pdata1$Diet2) #NS
+
+```
+
+```{r medi foods and nutrients vs waltera per person}
+##repeat the Waltera-Food associations and Waltera-Nutrient associations, summarized per person
+#per sample waltera abundance
+waltera <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/Rscripts_server/maaslin2_input/waltera_abundance.csv", row.names=1)
+waltera <- waltera %>% filter(SampleID %in% meta_seq$SampleID) %>%
+  group_by(Participant_ID) %>%
+  summarize(Waltera=mean(Acetatifactor))
+
+identical(names(medi_abund_wilcox_t), waltera$Participant_ID) ##after re-running "medi wilcoxons food" pre-processing!!
+
+#multiple Spearmans (foods)
+SP.p = apply(medi_abund_wilcox_t,1,
+             function(x) cor.test(c(x), waltera$Waltera, method='spearman')$p.value)
+SP.coef = apply(medi_abund_wilcox_t,1,
+                function(x) cor.test(c(x), waltera$Waltera, method='spearman')$estimate)
+WalteraFoods <- data.frame(SampleID=names(SP.p), pval=SP.p, coef=SP.coef)
+WalteraFoods$qval <- p.adjust(WalteraFoods$pval, method='fdr')
+head(WalteraFoods[order(WalteraFoods$pval),]) #the results are actually very similar
+
+#export these results for a supplemental table
+WalteraFoods_export <- WalteraFoods %>% filter(pval<0.05)
+WalteraFoods_export$X <- c("Waltera")
+WalteraFoods_export$Test <- c("Spearman")
+
+#add the diet hits from earlier
+results_FoodsDiet3_export <- results_FoodsDiet3
+results_FoodsDiet3_export$X <- c("Diet")
+results_FoodsDiet3_export$Test <- c("Wilcoxon")
+
+medi_export <- rbind(WalteraFoods_export, results_FoodsDiet3_export)
+#write.csv(medi_export, "/ebio/abt3_projects2/uHEAT/data/SupplementalTables/TableS#_medi.csv")
+
+##NUTRIENTS
+identical(names(medi_content_wilcox_t), waltera$Participant_ID) ##after re-running "medi wilcoxons food" pre-processing!!
+
+#Waltera vs Nutrients Spearman per person
+SP.p = apply(medi_content_wilcox_t,1,
+             function(x) cor.test(c(x), waltera$Waltera, method='spearman')$p.value)
+SP.coef = apply(medi_content_wilcox_t,1,
+                function(x) cor.test(c(x), waltera$Waltera, method='spearman')$estimate)
+WalteraNuts <- data.frame(SampleID=names(SP.p), pval=SP.p, coef=SP.coef)
+WalteraNuts$qval <- p.adjust(WalteraNuts$pval, method='fdr')
+head(WalteraNuts[order(WalteraNuts$pval),]) #some slightly odd nutrients coming up as per usual
+
+#check by nutrient class. ? above.
+#Waltera vs Nutrients class, Spearman per person
+
+
+pdata <- data.frame(t(medi_abund_wilcox_t), waltera)
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/WalteraVSHibiscus.pdf")
+p <- ggplot(pdata, aes(x=log(Waltera), y=log(Roselle_.plant.))) + 
+  geom_point() + 
+  geom_smooth(method='lm') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  xlab("Waltera (Log Abund.)") + ylab("Putative Cotton DNA (Log Abund.)") +
+  annotate('text', x=-7.5, y=-10, label=c('q=8.3e-05\nrho=0.34'))
+p
+#dev.off()
+
+```
+
+```{r medi foods and nutrients vs csrA}
+#per sample csra abundance
+csra <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/CsrA.csv", row.names=1)
+csra <- csra %>% filter(SampleID %in% meta_seq$SampleID)
+
+#per sample medi 
+medi_abund_wilcox <- medi_abund %>% group_by(sample_id) %>% filter(!duplicated(species))
+medi_abund_wilcox$wikipedia_id <- ifelse(medi_abund_wilcox$wikipedia_id=="", yes=medi_abund_wilcox$species, no=medi_abund_wilcox$wikipedia_id)
+
+medi_abund_wilcox_foodname <- medi_abund_wilcox %>% 
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  group_by(sample_id, wikipedia_id) %>%
+  dplyr::summarize(relative_abundance=sum(relative_abundance)) # sum the categories by sample
+medi_abund_wilcox_foodname
+
+#join it with the csra table to gain back the no-detection samples
+medi_abund_wilcox_foodname <- medi_abund_wilcox_foodname %>% full_join(csra, by=c("sample_id"="SampleID"))
+medi_abund_wilcox_foodname$wikipedia_id <- ifelse(medi_abund_wilcox_foodname$wikipedia_id=="", 
+                                                  yes="Oat", 
+                                                  no=medi_abund_wilcox_foodname$wikipedia_id)  #dummy food
+medi_abund_wilcox_foodname$relative_abundance <- ifelse(is.na(medi_abund_wilcox_foodname$relative_abundance),
+                                                        0, medi_abund_wilcox_foodname$relative_abundance) #dummy food is 0 abundant
+
+
+#then, make it wide. 
+medi_abund_wilcox_foodname_wide <- medi_abund_wilcox_foodname %>%
+  dplyr::select(-c(UniRef50_A0A1C2Y4D4, fever7d_aboveavg, Diet2, Participant_ID)) %>%
+  pivot_wider(names_from=wikipedia_id, values_from=relative_abundance) 
+medi_abund_wilcox_foodname_wide 
+dim(medi_abund_wilcox_foodname_wide) #147 different foods in 964 samples
+
+medi_abund_wilcox_foodname_wide <- medi_abund_wilcox_foodname_wide %>% filter(sample_id %in% csra$SampleID)
+csra <- csra[order(csra$SampleID),]
+medi_abund_wilcox_foodname_wide <- medi_abund_wilcox_foodname_wide[order(medi_abund_wilcox_foodname_wide$sample_id),]
+
+medi_abund_wilcox <- as.data.frame(medi_abund_wilcox_foodname_wide)
+row.names(medi_abund_wilcox) <- medi_abund_wilcox$sample_id
+medi_abund_wilcox$sample_id <- NULL
+medi_abund_wilcox_t <- as.data.frame(t(medi_abund_wilcox))
+dim(medi_abund_wilcox_t) #1022 samples in columns, 146 nutrients in rows
+#replace the NA with zeroes for no detection.
+medi_abund_wilcox[is.na(medi_abund_wilcox)] <- 0 
+medi_abund_wilcox_t[is.na(medi_abund_wilcox_t)] <- 0
+
+identical(row.names(medi_abund_wilcox), csra$SampleID)
+
+#multiple spearmans (STATISTICALLY QUESTIONABLE) - csra by Foods
+SP.p = apply(medi_abund_wilcox_t,1,
+             function(x) cor.test(c(x), csra$UniRef50_A0A1C2Y4D4, method='spearman')$p.value)
+SP.coef = apply(medi_abund_wilcox_t,1,
+                function(x) cor.test(c(x), csra$UniRef50_A0A1C2Y4D4, method='spearman')$estimate)
+pres <- data.frame(SampleID=names(SP.p), pval=SP.p, coef=SP.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+head(pres[order(pres$pval),]) 
+#nothing significant for CsrA
+
+
+```
+
+```{r medi foods and nutrients vs csra per person}
+##repeat the Waltera-Food associations and Waltera-Nutrient associations, summarized per person
+#per sample csra abundance
+csra <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/CsrA.csv", row.names=1)
+csra <- csra %>% filter(SampleID %in% meta_seq$SampleID) %>%
+  group_by(Participant_ID) %>%
+  summarize(CsrA=mean(UniRef50_A0A1C2Y4D4))
+
+medi_abund_wilcox_t_rna <- medi_abund_wilcox_t[,which(names(medi_abund_wilcox_t) %in% csra$Participant_ID)]
+identical(names(medi_abund_wilcox_t_rna), csra$Participant_ID) ##after re-running "medi wilcoxons food" pre-processing!!
+
+#multiple Spearmans
+SP.p = apply(medi_abund_wilcox_t_rna,1,
+             function(x) cor.test(c(x), csra$CsrA, method='spearman')$p.value)
+SP.coef = apply(medi_abund_wilcox_t_rna,1,
+                function(x) cor.test(c(x), csra$CsrA, method='spearman')$estimate)
+pres <- data.frame(SampleID=names(SP.p), pval=SP.p, coef=SP.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+head(pres[order(pres$pval),]) #nothing remotely significant
+
+##NUTRIENTS
+medi_content_wilcox_t_rna <- medi_content_wilcox_t[,which(names(medi_content_wilcox_t) %in% csra$Participant_ID)]
+identical(names(medi_content_wilcox_t_rna), csra$Participant_ID) ##after re-running "medi wilcoxons food" pre-processing!!
+
+#Waltera vs Nutrients Spearman per person
+SP.p = apply(medi_content_wilcox_t_rna,1,
+             function(x) cor.test(c(x), csra$CsrA, method='spearman')$p.value)
+SP.coef = apply(medi_content_wilcox_t_rna,1,
+                function(x) cor.test(c(x), csra$CsrA, method='spearman')$estimate)
+CsrANuts <- data.frame(SampleID=names(SP.p), pval=SP.p, coef=SP.coef)
+CsrANuts$qval <- p.adjust(CsrANuts$pval, method='fdr')
+head(CsrANuts[order(CsrANuts$pval),]) #some slightly odd nutrients coming up as per usual
+
+```
+
+
+```{r medi reads vs alpha diversity}
+#medi_reads <- read.csv("/ebio/abt3_projects2/uHEAT/data/Medi/Medi_reads_per_sample_24.10.22.csv")
+#hmph but that's actually per person, not per sample. 
+
+shannon5M <- read.table("/ebio/abt3_projects2/uHEAT/data/output_kraken_all/kraken/qiime2/5000000/alpha_diversity/shannon.tsv", header=TRUE)
+
+#take the median or mean per participant
+shannon5M$SampleID <- row.names(shannon5M)
+
+shannon5M_meta <- full_join(shannon5M, meta_seq)
+shannon5M_meta <- shannon5M_meta %>% filter(Status.=="completed")
+
+##total food reads, per sample.
+
+#total food reads per sample
+medi_persample <- medi_abund_wilcox %>% 
+  filter(Participant_ID %in% meta_seq$Participant_ID) %>%
+  group_by(sample_id, phylum) %>%
+  summarize( #first sum the categories by sample
+            relabund=sum(relative_abundance, na.rm=TRUE))
+medi_persample
+
+medi_persample$phylum <- ifelse(medi_persample$phylum=="", yes="Streptophyta", n=medi_persample$phylum) #dummy phylum
+
+medi_persample <- medi_persample %>% pivot_wider(names_from=phylum, values_from=relabund)
+medi_persample[is.na(medi_persample)] <- 0 #fill in zeroes
+
+#categorize
+medi_persample <- medi_persample %>%
+  mutate(Plants=Streptophyta + Basidiomycota,
+         TotalFood=Streptophyta + Chordata + Basidiomycota)
+
+#correlate.
+shannon_medi <- full_join(shannon5M_meta, medi_persample, by=c('SampleID'='sample_id')) %>% filter(!is.na(shannon_entropy))
+
+p <- ggplot(shannon_medi, aes(x=log(TotalFood), y=log(shannon_entropy))) + geom_point() + geom_smooth(method='lm')
+p
+cor.test(shannon_medi$TotalFood, shannon_medi$shannon_entropy, method='spearman') #very significant yes
+cor.test(shannon_medi$Plants, shannon_medi$shannon_entropy, method='spearman') #yes
+cor.test(shannon_medi$Chordata, shannon_medi$shannon_entropy, method='spearman') #no
+
+#versus summarized at per-person level.
+shannon_medi_sum <- shannon_medi %>% group_by(Participant_ID) %>%
+  summarize(shannon_entropy=mean(shannon_entropy), 
+            TotalFood=mean(TotalFood),
+            Plants=mean(Plants),
+            Chordata=mean(Chordata))
+
+cor.test(shannon_medi_sum$TotalFood, shannon_medi_sum$shannon_entropy, method='spearman') #very significant yes
+cor.test(shannon_medi_sum$Plants, shannon_medi_sum$shannon_entropy, method='spearman') #yes
+cor.test(shannon_medi_sum$Chordata, shannon_medi_sum$shannon_entropy, method='spearman') #no
+
+```
+
+```{r hibiscus vs cytokines?}
+#export the medi food table, per person, to integrate with somalogic.
+medi_abund_wilcox_t
+medi_abund_wilcox <- as.data.frame(t(medi_abund_wilcox_t))
+write.csv(medi_abund_wilcox, "/ebio/abt3_projects2/uHEAT/data/metadata/MEDI_foods_per_person.csv")
+
+```
+

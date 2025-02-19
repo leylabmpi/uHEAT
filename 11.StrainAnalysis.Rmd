@@ -1,0 +1,296 @@
+---
+title: "12.StrainAnalysis"
+author: "Kelsey Huus"
+date: "2024-10-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+##Packages
+library(dplyr)
+library(ggplot2)
+#library(data.table)
+library(tidyr)
+```
+
+```{r import}
+#metadata
+meta_seq <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/meta_seq_clean_series1.24.08.18.csv", 
+                     row.names=1)
+
+length(meta_seq$SampleID)
+
+meta_seq$fever7d_aboveavg <- factor(meta_seq$fever7d_aboveavg, levels=c("lo", "hi"))
+meta_seq$Bristol_Stool_Score2 <- ifelse(meta_seq$Bristol_Stool_Score2=="bNA", yes=NA, no=meta_seq$Bristol_Stool_Score2) #correct BSS label error
+
+#inStrain data
+inStrain_genome_compare <- read.delim(gzfile("/ebio/abt3_projects2/uHEAT/data/MAGS/inStrain/inStrain/output/inStrain_genomeWide_compare.tsv.gz"))
+head(inStrain_genome_compare) #okay so this provides the one-to-one comparison of every single genome versus another... across every scaffold...
+
+#extract a usable SampleID
+inStrain_genome_compare$SampleID_1 <- gsub(".bam", "", inStrain_genome_compare$name1)
+inStrain_genome_compare$SampleID_2 <- gsub(".bam", "", inStrain_genome_compare$name2)
+#Step 1B: and a corresponding Participant ID
+inStrain_genome_compare$Participant_ID1 <- sapply(strsplit(inStrain_genome_compare$SampleID_1,"_"), `[`, 1)
+inStrain_genome_compare$Participant_ID1 <- gsub("H", "HEAT_", inStrain_genome_compare$Participant_ID1)
+inStrain_genome_compare$Participant_ID2 <- sapply(strsplit(inStrain_genome_compare$SampleID_2,"_"), `[`, 1)
+inStrain_genome_compare$Participant_ID2 <- gsub("H", "HEAT_", inStrain_genome_compare$Participant_ID2)
+#Step 1C: and a corresponding sample no
+inStrain_genome_compare$sample_no1 <- sapply(strsplit(inStrain_genome_compare$SampleID_1,"_"), `[`, 2)
+inStrain_genome_compare$sample_no2 <- sapply(strsplit(inStrain_genome_compare$SampleID_2,"_"), `[`, 2)
+head(inStrain_genome_compare)
+
+#as per Hagay's code, add relevant per-sample metadata - in this case start with only fever and time data
+meta_seq_sample1 <- meta_seq %>% dplyr::select(SampleID, Relative_Day_numeric, Time01, fever7d_aboveavg)
+meta_seq_sample2 <- meta_seq %>% dplyr::select(SampleID, Relative_Day_numeric, Time01, fever7d_aboveavg)
+names(meta_seq_sample1) <- paste(names(meta_seq_sample1), "1", sep="_")
+names(meta_seq_sample2) <- paste(names(meta_seq_sample2), "2", sep="_")
+
+instrain_out_with_metadata <- Reduce(full_join, list(inStrain_genome_compare, meta_seq_sample1, meta_seq_sample2))
+head(instrain_out_with_metadata) #looks good, though mine are '1' and '2' instead of 'x' and 'y'
+instrain_out_with_metadata <- instrain_out_with_metadata %>%
+  mutate(is.same.ID=(Participant_ID1==Participant_ID2))
+instrain_out_with_metadata 
+
+```
+
+
+```{r add taxonomy}
+#add SRG real names and taxonomies to the tables
+#taxa information:
+drep99_tax <- read.delim("/ebio/abt3_projects2/uHEAT/data/MAGS/derep98/gtdbtk/gtdbtk_summary.tsv")
+head(drep99_tax)
+#pull out specific levels
+drep99_tax$classification
+drep99_tax$Phylum <- sapply(strsplit(drep99_tax$classification,"p__"), `[`, 2)
+drep99_tax$Phylum <- sapply(strsplit(drep99_tax$Phylum,";"), `[`, 1)
+drep99_tax$Family <- sapply(strsplit(drep99_tax$classification,"f__"), `[`, 2)
+drep99_tax$Family <- sapply(strsplit(drep99_tax$Family,";"), `[`, 1)
+drep99_tax$Genus <- sapply(strsplit(drep99_tax$classification,"g__"), `[`, 2)
+drep99_tax$Genus <- sapply(strsplit(drep99_tax$Genus,";"), `[`, 1)
+drep99_tax$Species <- sapply(strsplit(drep99_tax$classification,"s__"), `[`, 2)
+drep99_tax$Species <- sapply(strsplit(drep99_tax$Species,";"), `[`, 1)
+
+tax <- drep99_tax %>% dplyr::select(user_genome, classification, Phylum, Family, Genus, Species)
+
+instrain_out_with_metadata$genome <- gsub(".fna", "", instrain_out_with_metadata$genome)
+instrain_out_with_metadata_and_tax<- left_join(instrain_out_with_metadata, 
+                                               tax, by=c("genome"="user_genome"))
+
+instrain_out_with_metadata_and_tax
+```
+
+```{r popANI figures}
+
+popANI_per_spcies_filtered_same_ppl <- instrain_out_with_metadata_and_tax %>% 
+  filter(is.same.ID==TRUE) %>%
+  group_by(genome) %>%
+  filter(n() > 7) %>%
+  ungroup()
+
+#generate a better classification
+
+
+#pdf(width=5, height=4, "/ebio/abt3_projects2/uHEAT/data/plots4/popANI_per_spcies_same_ppl.pdf")
+p <-ggplot(popANI_per_spcies_filtered_same_ppl, aes(x=reorder(classification, popANI, median), y=popANI)) +
+  geom_boxplot() +
+  xlab("Species") +
+  ylab("Mean popANI") +
+  geom_hline(yintercept=0.99999, col="red") + 
+  ggtitle("popANI per species\n(within subjects)") +
+  theme_grey() +
+  theme(axis.text.x=element_blank(), #remove species names because they are long and irrelevant
+        axis.ticks.x = element_line(size = 0.5), # Enable x-axis tick marks
+        panel.grid.minor = element_blank(), 
+        panel.grid.major = element_line(color = "white", linewidth = 0.25)) # Adjust major gridlines
+p
+#dev.off()
+
+popANI_per_spcies_filtered_different_ppl <- instrain_out_with_metadata_and_tax %>% 
+  filter(is.same.ID!=TRUE) %>%
+  group_by(genome) %>%
+  filter(n() > 29) %>%
+  ungroup()
+
+#pdf(width=5, height=4, "/ebio/abt3_projects2/uHEAT/data/plots4/popANI_per_spcies_different_ppl.pdf")
+popANI_per_spcies_different_ppl_plot<-ggplot(popANI_per_spcies_filtered_different_ppl, aes(x=reorder(classification, popANI, median), y=popANI))+
+  geom_boxplot() +
+  xlab("Species") +
+  ylab("Mean popANI") +
+  geom_hline(yintercept=0.99999, col="red") + 
+  ggtitle("popANI per species\n(between subjects)") +
+   theme_grey() +
+  theme(axis.text.x=element_blank(), #remove species names because they are long and irrelevant
+        axis.ticks.x = element_line(size = 0.5), # Enable x-axis tick marks
+        panel.grid.minor = element_blank(), 
+        panel.grid.major = element_line(color = "white", linewidth = 0.25)) # Adjust major gridlines
+popANI_per_spcies_different_ppl_plot
+#dev.off()
+
+#filter panel A so that it contains the same species as panel B.
+popANI_per_spcies_filtered_same_ppl <- popANI_per_spcies_filtered_same_ppl %>%
+  filter(genome %in% popANI_per_spcies_filtered_different_ppl$genome)
+
+#pdf(width=5, height=4, "/ebio/abt3_projects2/uHEAT/data/plots4/popANI_per_spcies_same_ppl_v2.pdf")
+p <-ggplot(popANI_per_spcies_filtered_same_ppl, aes(x=reorder(classification, popANI, median), y=popANI)) +
+  geom_boxplot() +
+  xlab("Species") +
+  ylab("Mean popANI") +
+  geom_hline(yintercept=0.99999, col="red") + 
+  ggtitle("popANI per species\n(within subjects)") +
+  theme_grey() +
+  theme(axis.text.x=element_blank(), #remove species names because they are long and irrelevant
+        axis.ticks.x = element_line(size = 0.5), # Enable x-axis tick marks
+        panel.grid.minor = element_blank(), 
+        panel.grid.major = element_line(color = "white", linewidth = 0.25)) # Adjust major gridlines
+p
+#dev.off()
+
+
+```
+
+```{r evolution and persistence}
+
+#calculate a per-genus average, per subject
+per_genus_average <- instrain_out_with_metadata_and_tax %>%
+  filter(is.same.ID==TRUE) %>% #only allow within-person comparisons
+  group_by(Genus) %>%
+  summarize(average_popANI_per_Genus=mean(popANI, na.rm=TRUE),
+            SD_popANI_per_Genus=sd(popANI, na.rm=TRUE))
+per_genus_average
+summary(per_genus_average$average_popANI_per_Genus) #it's almost all 1 - most strains are perfectly identical
+
+#add avg to the original table
+instrain_out_with_metadata_and_tax <- instrain_out_with_metadata_and_tax %>% full_join(per_genus_average)
+head(instrain_out_with_metadata_and_tax)
+
+#persistence: take all comparisons where sample_no1==1, ie. the comparison is the 1st sample for that person
+persistence <- instrain_out_with_metadata_and_tax %>%
+  filter(is.same.ID==TRUE&sample_no1==1) %>% #only within-person compared to their first sample
+  group_by(Genus) %>% #per genus
+  mutate(corrected_by_genus_popANI=popANI/average_popANI_per_Genus,
+         popANI_zscore=((popANI-average_popANI_per_Genus)/SD_popANI_per_Genus)) %>%
+  group_by(sample_no2, Participant_ID1, Relative_Day_numeric_2, Time01_2) %>% #per sample 2 - all compared to sample 1! -  per person
+  summarize(persistence_popANI=mean(popANI, na.rm=TRUE), 
+            persistence_zscore=mean(popANI_zscore, na.rm=TRUE),
+            Comparisons=n())
+persistence[order(persistence$Participant_ID1),] #ok that seems kind of reasonable actually
+#self-comparisons of the same strain / sample are of course excluded...
+
+#evolution, on the other hand, should be only comparisons 2-1, 3-2, etc.
+evolution <- instrain_out_with_metadata_and_tax %>%
+  filter(is.same.ID==TRUE) %>% #only within-person
+  mutate(sample_difference=as.numeric(sample_no2)-as.numeric(sample_no1)) %>% #calculate the gap between samples
+  filter(sample_difference==1) %>% #only take sequential samples
+  group_by(Genus) %>% #per genus
+  mutate(corrected_by_genus_popANI=popANI/average_popANI_per_Genus,
+         popANI_zscore=((popANI-average_popANI_per_Genus)/SD_popANI_per_Genus)) %>%
+  group_by(sample_no2, Participant_ID1, Relative_Day_numeric_2, Time01_2) %>% #per sample 2, knowing that all comparisons are to the previous sample
+  summarize(evolution_popANI=mean(popANI, na.rm=TRUE), 
+            evolution_zscore=mean(popANI_zscore, na.rm=TRUE),
+            Comparisons=n())
+evolution
+
+#cool so now I guess let's just plot over time by fever, right?
+persistence_meta <- persistence %>% 
+  dplyr::rename(Participant_ID=Participant_ID1) %>%
+  full_join(meta)
+persistence_meta
+
+pdata <- persistence_meta %>% filter(!is.na(fever7d_aboveavg)&Relative_Day_numeric_2<8)
+pdata$fever7d_aboveavg <- factor(pdata$fever7d_aboveavg, levels=c("lo", "hi"))
+
+#Time01
+#pdf(width=4, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/3G_inStrain_persistance_overtime.pdf")
+p <- ggplot(pdata, aes(x=Time01_2, y=persistence_zscore, colour=fever7d_aboveavg)) + 
+  #geom_point() +
+  geom_line(aes(group=Participant_ID), alpha=0.3) +
+  geom_smooth(method='loess', fill='white', alpha=0.7) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  scale_colour_manual(values=c("grey50", "firebrick3")) + 
+  xlab("Time (days)") + ylab("Persistence Z-Score") + ggtitle("Strain Persistence") +
+  labs(colour = "Fever") + 
+  annotate("segment", x=0, xend=0, y=-3, yend=3, linetype=2) + 
+  #annotate("segment", x=-7, xend=7, y=0, yend=0, linetype=1) +
+  scale_x_continuous(breaks = (seq(-7, 7, by = 7)), lim=c(-7, 7)) 
+p
+#dev.off()
+
+#test statistically via mixed linear model #the same way as for beta diversity 
+m1 <- lme(persistence_zscore ~ seq_depth +  Bristol_Stool_Score2 + Time01_2 + fever7d_aboveavg + Time01_2*fever7d_aboveavg, random=~1|Participant_ID, data = pdata, 
+            na.action=na.exclude, method="ML")
+summary(m1) #NS
+
+evolution_meta <- evolution %>% 
+  dplyr::rename(Participant_ID=Participant_ID1) %>%
+  full_join(meta)
+evolution_meta
+
+pdata <- evolution_meta %>% filter(!is.na(fever7d_aboveavg)&Relative_Day_numeric_2<8)
+pdata$fever7d_aboveavg <- factor(pdata$fever7d_aboveavg, levels=c("lo", "hi"))
+
+#pdf(width=4, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/3H_inStrain_evolution_overtime.pdf")
+p <- ggplot(pdata, aes(x=Time01_2, y=evolution_zscore, colour=fever7d_aboveavg)) + 
+  #geom_point() +
+  geom_line(aes(group=Participant_ID), alpha=0.3) + 
+    geom_smooth(method='loess', fill='white', alpha=0.7) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"),
+        axis.title.y = element_text(margin = margin(r = 10))) +
+  scale_colour_manual(values=c("grey50", "firebrick3")) + 
+  xlab("Time (days)") + ylab("Evolution Z-Score") + ggtitle("Strain Evolution") +
+  labs(colour = "Fever") + 
+  annotate("segment", x=0, xend=0, y=-3, yend=3, linetype=2) + 
+  #annotate("segment", x=-7, xend=7, y=0, yend=0, linetype=2) +
+  scale_x_continuous(breaks = (seq(-7, 7, by = 7)), lim=c(-7, 7))
+p
+#dev.off()
+
+#test statistically via mixed linear model #the same way as for beta diversity 
+m1 <- lme(evolution_zscore ~ seq_depth +  Bristol_Stool_Score2 + Time01_2 + fever7d_aboveavg + Time01_2*fever7d_aboveavg, random=~1|Participant_ID, data = pdata, 
+            na.action=na.exclude, method="ML")
+summary(m1) #NS
+
+#thinking about persistence. Is there actually lower persistence after the vaccine?
+persistence_perperson_beforeafter <- persistence %>%
+  mutate(Time=ifelse(Time01_2<0, "before", "after")) %>%
+  group_by(Participant_ID1, Time) %>%
+  summarize(persistence_zscore=mean(persistence_zscore))
+persistence_perperson_beforeafter
+
+pdata <- persistence_perperson_beforeafter %>% filter(!is.na(Time))
+pdata$Time <- factor(pdata$Time, levels=c("before", "after"))
+pdata <- pdata %>% filter(Participant_ID1 %in% meta$Participant_ID)
+pdata
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/plots4/inStrain_persistence_beforeafter.pdf")
+p <- ggplot(pdata, aes(x=Time, y=persistence_zscore)) + geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0) + 
+  theme_bw() + 
+  ggtitle("Persistence Per Person") +
+  annotate('segment', x=1, xend=2, y=0.8, yend=0.8) +
+  annotate('text', x=1.5, y=1, label=c("*"))
+p
+#dev.off()
+wilcox.test(pdata$persistence_zscore~pdata$Time) #p=0.03
+
+#add fever data just to check
+meta$Time <- NULL
+pdata1 <- pdata %>% 
+  dplyr::rename(Participant_ID=Participant_ID1) %>%
+  full_join(meta) %>% filter(!is.na(fever7d_aboveavg)&!is.na(Time))
+pdata1$fever7d_aboveavg <- factor(pdata1$fever7d_aboveavg, levels=c("lo", "hi"))
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/plots4/inStrain_persistence_beforeafter_fever.pdf")
+p <- ggplot(pdata1, aes(x=Time, y=persistence_zscore, colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) +
+  geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0)) +
+  theme_bw() + 
+  ggtitle("Persistence Per Person") +
+  scale_colour_manual(values=c("grey80", "firebrick3"))
+p
+#dev.off()
+
+```

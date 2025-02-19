@@ -1,0 +1,470 @@
+---
+title: "07a.Transcriptomics.Diversity"
+author: "Kelsey Huus"
+date: "2024-07-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+##Packages
+library(dplyr)
+library(ggplot2)
+#library(data.table)
+library(tidyr)
+library(ape)
+library(nlme)
+```
+
+```{r qc read depth}
+##Read Files - QC
+seqstats <- read.table("/ebio/abt3_projects2/uHEAT2/data/output_QC_RNAseq/reports/final/seqkit_stats.tsv", header=TRUE) 
+seqstats2 <- read.table("/ebio/abt3_projects2/uHEAT2/data/output_QC_RNAseq_reps23/reports/final/seqkit_stats.tsv", header=TRUE) 
+
+##first QC A - read depth (rep1)
+seqstats$sample_no <- sapply(strsplit(seqstats$Sample,"_"), `[`, 2)
+seqstats_filt <- seqstats %>% filter(Read==1)
+seqstats_filt$num_seqs2 <- seqstats_filt$num_seqs*2
+
+##first QC B - read depth (rep 2-3)
+seqstats2$sample_no <- sapply(strsplit(seqstats2$Sample,"_"), `[`, 2)
+seqstats2_filt <- seqstats2 %>% filter(Read==1)
+seqstats2_filt$num_seqs2 <- seqstats2_filt$num_seqs*2
+#similar order of magnitude read depth, a little lower on average but more tightly clustered.
+#makes sense because there are slightly more samples per lane, and Silke is more consistent :) thanks Silke
+
+#combine them and colour by sequencing pool #seqstats2 is named according to plate which is actually rather convenient here
+seqstats2_filt$plate <- sapply(strsplit(seqstats2_filt$Sample,"_"), `[`, 1)
+seqstats2_filt$pool <- ifelse(seqstats2_filt$plate=="P01", "pool2", "pool3")
+seqstats_filt$pool <- c("pool1")
+
+seqstats_all <- full_join(seqstats_filt, seqstats2_filt) #only Read1, no dups
+
+summary(seqstats_all$num_seqs2)
+
+#pdf(width=6, height=5, "/ebio/abt3_projects2/uHEAT2/data/output_QC_RNAseq/seq_depth_histogram_pools1-3-postqc.pdf")
+p <- ggplot(seqstats_all, aes(x=num_seqs, fill=pool)) + geom_histogram(alpha=0.5)
+p <- p + xlab("Number of paired reads")
+p <- p + theme_bw()
+p
+#dev.off()
+
+```
+
+```{r pcoa (taxa)}
+#7d fever with RNA seq depth, etc - updated
+meta_seq <- read.csv("/ebio/abt3_projects2/uHEAT2/data/metadata/meta_seq_rna_fever7d_series1_24.08.18.csv")
+meta_seq$fever7d_aboveavg <- factor(meta_seq$fever7d_aboveavg, levels=c("lo", "hi"))
+
+#read in beta diversity from kraken
+bray5M <- read.table("/ebio/abt3_projects2/uHEAT2/data/output_LLMGP_RNA_all/kraken/qiime2/5000000/beta_diversity/braycurtis.tsv",
+                     header=TRUE)
+head(bray5M)
+
+#samples retained
+dim(bray5M) #256 out of 96*3=288, not terrible
+
+#use ape
+PCOA <- pcoa(bray5M)
+barplot(PCOA$values$Relative_eig[1:10])
+PCOA$values$Relative_eig[1:2] #quite low: only 9% and 8%! but the third is also not bad
+PC1 <- round((PCOA$values$Relative_eig[1]*100), 1)
+PC2 <- round((PCOA$values$Relative_eig[2]*100), 1)
+
+#plot with some metadata
+pdata <- data.frame(PCOA$vectors)
+pdata <- pdata[grep("H", row.names(pdata)),]
+pdata$Sample <- row.names(pdata)
+
+pdata$Participant_ID <- sapply(strsplit(row.names(pdata),"_"), `[`, 1)
+pdata$Participant_ID <- gsub("H", "HEAT_", pdata$Participant_ID)
+pdata$sample_no <- sapply(strsplit(row.names(pdata),"_"), `[`, 2)
+pdata <- pdata %>% filter(Sample %in% meta_seq$SampleID) #only keep correct samples...
+#pdata <- full_join(pdata, samples) #for plotting by batch
+#pdata <- pdata %>% filter(Sample %in% row.names(bray5M))
+#pdata[which(is.na(pdata$batch)),]$batch <- c("pool1") #H051 which got renamed
+
+#Participant ID
+#pdf(width=6, height=6, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/3C.TranscriptomicPCA.pdf")
+p1 <-ggplot(pdata, aes(x=Axis.1, y=Axis.2, colour=Participant_ID)) + geom_point(size=2)
+p1 <- p1 + geom_path() 
+p1 <- p1 + theme_bw(base_size=16)
+p1 <- p1 + ggtitle("Bray Curtis - Transcriptomics") + xlab(paste("PC1 (", PC1, "%)", sep="")) + ylab(paste("PC2 (", PC2, "%)", sep=""))
+p1 <- p1 + theme(legend.position="none")
+p1
+#dev.off()
+
+```
+
+```{r distance self vs other}
+#comparing distance to self
+bray5M_meta <- bray5M %>% mutate(SampleID=row.names(bray5M))
+
+#and add a Participant ID
+bray5M_meta$Participant_ID <- sapply(strsplit(bray5M_meta$Sample,"_"), `[`, 1)
+bray5M_meta$Participant_ID <- gsub("H", "HEAT_", bray5M_meta$Participant_ID)
+
+bray5M_long <- pivot_longer(bray5M_meta,cols=c(1:256),names_to="SampleID2",values_to="Bray_Distance")
+bray5M_long_meta <- meta_seq %>% dplyr::select(SampleID, Participant_ID, Relative_Day) %>%
+  filter(SampleID %in% bray5M_long$SampleID) %>%
+  full_join(bray5M_long)
+bray5M_long_meta$Participant_ID2 <- sapply(strsplit(bray5M_long_meta$SampleID2,"_"), `[`, 1)
+bray5M_long_meta$Participant_ID2 <- gsub("H", "HEAT_", bray5M_long_meta$Participant_ID2)
+
+bray5M_q1 <- bray5M_long_meta %>% filter(Bray_Distance>0) %>% #get rid of the auto comparisons
+  group_by(Participant_ID) %>% 
+  dplyr::summarize(distance_self=median(Bray_Distance[Participant_ID==Participant_ID2], na.rm=TRUE),
+            distance_other=median(Bray_Distance[Participant_ID!=Participant_ID2], na.rm=TRUE))
+bray5M_q1 
+
+#plot and test
+pdata <- pivot_longer(bray5M_q1, cols=c(2:3), names_to="Distance", values_to="Bray_Distance")
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/3D.TranscriptomicDistance.pdf")
+p <- ggplot(pdata, aes(x=Distance, y=Bray_Distance)) + geom_boxplot(outlier.shape=NA, outlier.size=NA)
+p <- p + geom_jitter(width=0.1, height=0)
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + ylab("Bray Curtis Dissimilarity") #+ ggtitle("Beta Diversity")
+p <- p + annotate("segment", x=1, xend=2, y=0.9, yend=0.9)
+p <- p + annotate("text", x=1.5, y=0.95, label="****")
+p
+#dev.off()
+
+wilcox.test(pdata$Bray_Distance~pdata$Distance)
+
+#export the RNA distances so I can also plot them side-by-side with the DNA 
+#write.csv(pdata, "/ebio/abt3_projects2/uHEAT2/data/output_LLMGP_RNA_all/kraken/qiime2/5000000/beta_diversity/RNA_braycurtis_selfvsother_summary.csv")
+
+```
+
+```{r alpha}
+shannon5M <- read.table("/ebio/abt3_projects2/uHEAT2/data/output_LLMGP_RNA_all/kraken/qiime2/5000000/alpha_diversity/shannon.tsv", header=TRUE)
+
+#take the median or mean per participant
+shannon5M$Participant_ID1 <- sapply(strsplit(row.names(shannon5M),"_"), `[`, 1)
+shannon5M$sample_no <- sapply(strsplit(row.names(shannon5M),"_"), `[`, 2)
+shannon5M$Participant_ID <- gsub("H", "HEAT_", shannon5M$Participant_ID1)
+shannon5M_sum <- shannon5M %>% 
+  group_by(Participant_ID) %>%
+  summarize(mean_shannon=mean(shannon_entropy), median_shannon=median(shannon_entropy))
+
+summary(shannon5M_sum$mean_shannon)
+summary(shannon5M_sum$median_shannon) #mean and median are very similar
+
+#do I have all the samples
+length(shannon5M_sum$Participant_ID) #n=43 people yes
+shannon5M$sample_no <- NULL
+shannon5M_meta <- full_join(shannon5M, meta_seq) #not summary - per sample
+shannon5M_meta <- shannon5M_meta %>% filter(Participant_ID %in% meta_seq$Participant_ID)
+dplyr::count(shannon5M_meta, Participant_ID) #something is funky here
+dplyr::count(meta_seq, Participant_ID)
+dplyr::count(shannon5M, Participant_ID)
+
+#is it affected by the time at RT?
+cor.test(shannon5M_meta$shannon_entropy, shannon5M_meta$Time_at_RT, method='spearman') 
+#yes, although small effect
+
+p <- ggplot(shannon5M_meta, aes(x=Time_at_RT, y=shannon_entropy)) + geom_point() + geom_smooth(method='lm')
+p
+
+shannon5M_sum <- full_join(shannon5M_sum, meta) #note - fever data is again a summary of first shot
+dim(shannon5M_sum)
+
+#what is the overall healthy average?
+df <- shannon5M_sum %>% filter(COVID_infection_during_study=="")
+summary(df$mean_shannon)
+
+
+#alpha diversity baseline only
+shannon5M_sum2 <- shannon5M_meta %>%
+  filter(!is.na(shannon_entropy)&Time01<0) %>%
+  group_by(Participant_ID) %>%
+  summarize(mean_shannon=mean(shannon_entropy), median_shannon=median(shannon_entropy))
+shannon5M_sum2 <- full_join(shannon5M_sum2, meta)
+
+wilcox.test(shannon5M_sum2$mean_shannon~shannon5M_sum2$fever7d_aboveavg) #NS
+pdata1 <- shannon5M_sum2 %>% filter(!is.na(fever7d_aboveavg))
+pdata1$fever7d_aboveavg <- factor(pdata1$fever7d_aboveavg, levels=c("lo", "hi"))
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S3C.TranscriptomicShannon.pdf")
+p <- ggplot(pdata1, aes(x=fever7d_aboveavg, y=mean_shannon)) + geom_boxplot(outlier.size=NA, outlier.shape=NA)
+p <- p + geom_jitter(width=0.1, height=0)
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + annotate("segment", x=1, xend=2, y=9, yend=9)
+p <- p + annotate("text", label="NS", x=1.5, y=9.2)
+p <- p + xlab("Fever") + ylab("Baseline Shannon Diversity")
+p
+#dev.off()
+
+```
+
+```{r distance by time taxa}
+
+bray5M_meta <- bray5M %>% mutate(SampleID=row.names(bray5M))
+bray5M_long <- pivot_longer(bray5M_meta,cols=c(1:length(names(bray5M))),
+                            names_to="SampleID2",values_to="Bray_Distance") #the comparison sample
+
+#adjust the mixed samples
+#double checking that it is already correct
+meta_seq %>% filter(Participant_ID=="HEAT_051") %>% dplyr::select(Participant_ID, SampleID, sample_no)
+
+#and now merge with the real meta seq
+bray5M_long_meta <- meta_seq %>% dplyr::select(SampleID, Participant_ID, Relative_Day) %>%
+  filter(SampleID %in% bray5M_long$SampleID) %>% #minus samples that were below rarefaction
+  full_join(bray5M_long) %>%
+  filter(SampleID %in% meta_seq$SampleID) #only keep clean samples
+
+bray5M_long_meta$Participant_ID2 <- sapply(strsplit(bray5M_long_meta$SampleID2,"_"), `[`, 1)
+bray5M_long_meta$Participant_ID2 <- gsub("H", "HEAT_", bray5M_long_meta$Participant_ID2)
+
+#Q2: distance to self at each individual time point
+#first: check which relative days are NA, because these will result in the whole person being kicked out
+bray5M_long_meta %>% filter(is.na(Relative_Day)) %>% 
+  filter(!duplicated(SampleID)) %>% dplyr::select(SampleID, Relative_Day)
+#all possible missing relative days now added - it is clean - the rest should be excluded
+
+bray5M_long_meta <- bray5M_long_meta %>%
+  filter(!is.na(Relative_Day))
+
+#define bray-curtis distance per day #ID==ID2, i.e., same person is being compared
+#for example at first day, t-7, the data looks like this:
+head(bray5M_long_meta[which(bray5M_long_meta$Relative_Day=="t-7"&bray5M_long_meta$Participant_ID==bray5M_long_meta$Participant_ID2),])
+
+bray5M_q2 <- bray5M_long_meta %>% filter(Bray_Distance>0) %>% #get rid of the exact auto comparisons, i.e. same sample
+  group_by(Participant_ID) %>% #per person
+  summarize(distance0=median(Bray_Distance[Relative_Day=="t-7"&Participant_ID==Participant_ID2]),
+            distance1=median(Bray_Distance[Relative_Day=="t-6"&Participant_ID==Participant_ID2]),
+            distance2=median(Bray_Distance[Relative_Day=="t-5"&Participant_ID==Participant_ID2]),
+            distance3=median(Bray_Distance[Relative_Day=="t-4"&Participant_ID==Participant_ID2]),
+            distance4=median(Bray_Distance[Relative_Day=="t-3"&Participant_ID==Participant_ID2]),
+            distance5=median(Bray_Distance[Relative_Day=="t-2"&Participant_ID==Participant_ID2]),
+            distance6=median(Bray_Distance[Relative_Day=="t-1"&Participant_ID==Participant_ID2]),
+            distance7=median(Bray_Distance[Relative_Day=="t0"&Participant_ID==Participant_ID2]),
+            distance8=median(Bray_Distance[Relative_Day=="t+1"&Participant_ID==Participant_ID2]),
+            distance9=median(Bray_Distance[Relative_Day=="t+2"&Participant_ID==Participant_ID2]),
+            distance10=median(Bray_Distance[Relative_Day=="t+3"&Participant_ID==Participant_ID2]),
+            distance11=median(Bray_Distance[Relative_Day=="t+4"&Participant_ID==Participant_ID2]),
+            distance12=median(Bray_Distance[Relative_Day=="t+5"&Participant_ID==Participant_ID2]),
+            distance13=median(Bray_Distance[Relative_Day=="t+6"&Participant_ID==Participant_ID2]),
+            distance14=median(Bray_Distance[Relative_Day=="t+7"&Participant_ID==Participant_ID2])
+            
+  )
+head(as.data.frame(bray5M_q2)) #much sparser of course #it is still necessary to specify distance to self!!
+
+#plot and test
+pdata <- pivot_longer(bray5M_q2, cols=c(2:length(names(bray5M_q2))), 
+                      names_to="Day", values_to="Bray_Distance")
+pdata$Day <- gsub("distance", "d", pdata$Day)
+pdata$Day <- factor(pdata$Day, levels=c("d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7",
+                                        "d8", "d9", "d10", "d11", "d12", "d13", "d14"))
+#add fever data per participant
+pdata <- pdata %>% full_join(meta) %>% filter(!is.na(Day))
+
+#versus smoothed by Time01
+pdata$Relative_Day_numeric <- as.numeric(gsub("d", "", pdata$Day)) - 7
+brayq2_meta <- pdata %>% dplyr::select(Participant_ID, Relative_Day_numeric, Bray_Distance) %>% 
+  full_join(meta_seq) #recollect per-sample information
+brayq2_meta <- brayq2_meta %>% filter(!is.na(Relative_Day_numeric) & !is.na(fever7d_aboveavg))
+#brayq2_meta <- brayq2_meta %>% filter(Relative_Day_numeric<=8)
+
+#pdf("/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2C.TranscriptomicsBrayTemporalFever.pdf", width=4, height=3)
+p <- ggplot(brayq2_meta, aes(x=Time01, y=Bray_Distance, colour=fever7d_aboveavg)) + 
+  #geom_point() +
+    geom_line(aes(group=Participant_ID), alpha=0.3) +
+  geom_smooth(method='loess', fill='white', alpha=0.7) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab("Time (days)") + ylab("Bray Curtis Dissimilarity") + ggtitle("RNA Beta Diversity (Taxa)") + labs(colour="Fever") +
+  scale_x_continuous(breaks = (seq(-7, 7, by = 7))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) + 
+  annotate('segment', x=0, xend=0, y=0.1, yend=0.7, linetype='dashed')
+p
+#dev.off()
+
+#test statistically via mixed linear model #the same way as for beta diversity 
+m1 <- lme(Bray_Distance ~ RNA_seq_depth +  Bristol_Stool_Score2 + Time01 + fever7d_aboveavg + Time01*fever7d_aboveavg, random=~1|Participant_ID, data = brayq2_meta, 
+            na.action=na.exclude, method="ML")
+summary(m1) #NS
+
+```
+
+
+```{r pcoa pathway}
+#bray on the pathways #I don't know which one to use (strat, unstrat? gene, pathway?)
+bray5M_3 <- read.table("/ebio/abt3_projects2/uHEAT2/data/output_LLMGP_RNA_all/humann3/qiime2/unnorm/stratified/pathway/500000/beta_diversity/braycurtis.tsv",
+                       header=TRUE)
+head(bray5M_3)
+
+#samples retained
+dim(bray5M_3) #257 out of (260?)
+
+#use ape
+PCOA <- pcoa(bray5M_3)
+barplot(PCOA$values$Relative_eig[1:10])
+PCOA$values$Relative_eig[1:3] #9.8, 7.5%, 5.5%... 
+PC1 <- round((PCOA$values$Relative_eig[1]*100), 1)
+PC2 <- round((PCOA$values$Relative_eig[2]*100), 1)
+
+#plot with some metadata
+bray5M_3_PCA <- data.frame(PCOA$vectors)
+bray5M_3_PCA$SampleID <- row.names(bray5M_3_PCA)
+#no need to fix names - doubles are already correctly excluded.
+
+bray5M_3_PCA <- full_join(bray5M_3_PCA, meta_seq) %>% filter(!is.na(fever7d_aboveavg))
+bray5M_3_PCA <- bray5M_3_PCA %>% filter(SampleID %in% row.names(bray5M_3))
+bray5M_3_PCA <- bray5M_3_PCA %>% filter(SampleID %in% meta_seq$SampleID)
+
+#actual samples retained
+length(bray5M_3_PCA$SampleID)
+
+#Participant ID & by sample #, i.e. temporally directional
+my_stool_colours <- c("1"="lightblue1", "2"="lightblue2","3"="lightblue3",
+                      "4"="pink1", "5"="pink2", "6"="pink3",
+                      "8"="deepskyblue1", "9"="deepskyblue2", "10"="deepskyblue3",
+                      "11"="firebrick1", "12"="firebrick2", "13"="firebrick3")
+
+#pdf(width=6, height=5, "/ebio/abt3_projects2/uHEAT/data/CleanPlotsTemporal/2E.TranscriptomicPCA.pdf")
+p1 <-ggplot(bray5M_3_PCA, aes(x=Axis.1, y=Axis.2, colour=as.factor(Stool_ID), label=Stool_ID)) 
+p1 <- p1 + geom_line(aes(group=Participant_ID), show.legend = FALSE)
+p1 <- p1 + theme_bw(base_size=16)
+p1 <- p1 + scale_colour_manual(values=my_stool_colours)
+p1 <- p1 + ggtitle("Bray Curtis - Transcriptomics") + xlab(paste("PC1 (", PC1, "%)", sep="")) + ylab(paste("PC2 (", PC2, "%)", sep=""))
+p1 <- p1 + geom_text()
+#p1 <- p1 + theme(legend.position="none")
+p1
+#dev.off()
+
+
+```
+
+
+```{r distance by time pathway}
+
+bray5M_3_meta <- bray5M_3 %>% mutate(SampleID=row.names(bray5M_3))
+bray5M_3_long <- pivot_longer(bray5M_3_meta,cols=c(1:length(names(bray5M_3))),
+                            names_to="SampleID2",values_to="Bray_Distance") #the comparison sample
+
+#adjust the mixed samples
+#double checking that it is already correct
+meta_seq %>% filter(Participant_ID=="HEAT_051") %>% dplyr::select(Participant_ID, SampleID, sample_no)
+
+#and now merge with the real meta seq
+bray5M_3_long_meta <- meta_seq %>% dplyr::select(SampleID, Participant_ID, Relative_Day) %>%
+  filter(SampleID %in% bray5M_3_long$SampleID) %>% #minus samples that were below rarefaction
+  full_join(bray5M_3_long) %>%
+  filter(SampleID %in% meta_seq$SampleID) #only keep clean samples
+
+bray5M_3_long_meta$Participant_ID2 <- sapply(strsplit(bray5M_3_long_meta$SampleID2,"_"), `[`, 1)
+bray5M_3_long_meta$Participant_ID2 <- gsub("H", "HEAT_", bray5M_3_long_meta$Participant_ID2)
+
+#Q2: distance to self at each individual time point
+#first: check which relative days are NA, because these will result in the whole person being kicked out
+bray5M_3_long_meta %>% filter(is.na(Relative_Day)) %>% 
+  filter(!duplicated(SampleID)) %>% dplyr::select(SampleID, Relative_Day)
+#all possible missing relative days now added - it is clean - the rest should be excluded
+
+bray5M_3_long_meta <- bray5M_3_long_meta %>%
+  filter(!is.na(Relative_Day))
+
+#define bray-curtis distance per day #ID==ID2, i.e., same person is being compared
+#for example at first day, t-7, the data looks like this:
+head(bray5M_3_long_meta[which(bray5M_3_long_meta$Relative_Day=="t-7"&bray5M_3_long_meta$Participant_ID==bray5M_3_long_meta$Participant_ID2),])
+
+bray5M_3_q2 <- bray5M_3_long_meta %>% filter(Bray_Distance>0) %>% #get rid of the exact auto comparisons, i.e. same sample
+  group_by(Participant_ID) %>% #per person
+  summarize(distance0=median(Bray_Distance[Relative_Day=="t-7"&Participant_ID==Participant_ID2]),
+            distance1=median(Bray_Distance[Relative_Day=="t-6"&Participant_ID==Participant_ID2]),
+            distance2=median(Bray_Distance[Relative_Day=="t-5"&Participant_ID==Participant_ID2]),
+            distance3=median(Bray_Distance[Relative_Day=="t-4"&Participant_ID==Participant_ID2]),
+            distance4=median(Bray_Distance[Relative_Day=="t-3"&Participant_ID==Participant_ID2]),
+            distance5=median(Bray_Distance[Relative_Day=="t-2"&Participant_ID==Participant_ID2]),
+            distance6=median(Bray_Distance[Relative_Day=="t-1"&Participant_ID==Participant_ID2]),
+            distance7=median(Bray_Distance[Relative_Day=="t0"&Participant_ID==Participant_ID2]),
+            distance8=median(Bray_Distance[Relative_Day=="t+1"&Participant_ID==Participant_ID2]),
+            distance9=median(Bray_Distance[Relative_Day=="t+2"&Participant_ID==Participant_ID2]),
+            distance10=median(Bray_Distance[Relative_Day=="t+3"&Participant_ID==Participant_ID2]),
+            distance11=median(Bray_Distance[Relative_Day=="t+4"&Participant_ID==Participant_ID2]),
+            distance12=median(Bray_Distance[Relative_Day=="t+5"&Participant_ID==Participant_ID2]),
+            distance13=median(Bray_Distance[Relative_Day=="t+6"&Participant_ID==Participant_ID2]),
+            distance14=median(Bray_Distance[Relative_Day=="t+7"&Participant_ID==Participant_ID2])
+            
+  )
+head(as.data.frame(bray5M_3_q2)) #much sparser of course #it is still necessary to specify distance to self!!
+
+#plot and test
+pdata <- pivot_longer(bray5M_3_q2, cols=c(2:length(names(bray5M_3_q2))), 
+                      names_to="Day", values_to="Bray_Distance")
+pdata$Day <- gsub("distance", "d", pdata$Day)
+pdata$Day <- factor(pdata$Day, levels=c("d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7",
+                                        "d8", "d9", "d10", "d11", "d12", "d13", "d14"))
+#add fever data per participant
+pdata <- pdata %>% full_join(meta) %>% filter(!is.na(Day))
+
+#versus smoothed by Time01
+pdata$Relative_Day_numeric <- as.numeric(gsub("d", "", pdata$Day)) - 7
+brayq2_meta <- pdata %>% dplyr::select(Participant_ID, Relative_Day_numeric, Bray_Distance) %>% 
+  full_join(meta_seq) #recollect per-sample information
+brayq2_meta <- brayq2_meta %>% filter(!is.na(Relative_Day_numeric) & !is.na(fever7d_aboveavg))
+#brayq2_meta <- brayq2_meta %>% filter(Relative_Day_numeric<=8)
+
+#pdf("/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2D.TranscriptomicsBrayTemporalFeverPathway.pdf", width=4, height=3)
+p <- ggplot(brayq2_meta, aes(x=Time01, y=Bray_Distance, colour=fever7d_aboveavg)) + 
+  #geom_point() +
+  geom_line(aes(group=Participant_ID), alpha=0.3) +
+  geom_smooth(method='loess', fill='white', alpha=0.7) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab("Time (days)") + ylab("Bray Curtis Dissimilarity") + ggtitle("RNA Beta Diversity (Pathways)") + labs(colour="Fever") +
+  scale_x_continuous(breaks = (seq(-7, 7, by = 7))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) + 
+  annotate('segment', x=0, xend=0, y=0.1, yend=0.7, linetype='dashed')
+p
+#dev.off()
+
+#test statistically via mixed linear model #the same way as for beta diversity 
+m1 <- lme(Bray_Distance ~ RNA_seq_depth +  Bristol_Stool_Score2 + Time01 + fever7d_aboveavg + Time01*fever7d_aboveavg, random=~1|Participant_ID, data = brayq2_meta, 
+            na.action=na.exclude, method="ML")
+summary(m1) #NS
+
+```
+
+
+```{r alpha over time}
+shannon5M <- read.table("/ebio/abt3_projects2/uHEAT2/data/output_LLMGP_RNA_all/kraken/qiime2/5000000/alpha_diversity/shannon.tsv", header=TRUE)
+
+#join with metadata
+shannon5M$SampleID <- row.names(shannon5M)
+shannon5M_meta <- full_join(shannon5M, meta_seq)
+shannon5M_meta <- shannon5M_meta %>% filter(Status.=="completed")
+
+#plot longitudinal alpha diversity by fever
+pdata <- shannon5M_meta %>% filter(!is.na(fever7d_aboveavg)&Time01<=8)
+#cairo_pdf("/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2E.RNAShannonTemporalFever.pdf", width=4, height=3)
+p <- ggplot(pdata, aes(x=Time01, y=shannon_entropy, colour=fever7d_aboveavg)) + 
+  #geom_point() +
+  geom_line(aes(group=Participant_ID), alpha=0.3) +
+  geom_smooth(method='loess', fill='white', alpha=0.7) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab("Time (days)") + ylab("Shannon entropy") + ggtitle("RNA Alpha Diversity") + labs(colour="∆T") +
+  scale_x_continuous(breaks = (seq(-7, 7, by = 7))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) + 
+  annotate('segment', x=0, xend=0, y=5, yend=9, linetype='dashed')
+p
+#dev.off()
+
+#test statistically via mixed linear model #the same way as for beta diversity 
+m1 <- lme(shannon_entropy ~ RNA_seq_depth +  Bristol_Stool_Score2 + Time01 + fever7d_aboveavg + Time01*fever7d_aboveavg, random=~1|Participant_ID, data = pdata, 
+            na.action=na.exclude, method="ML")
+summary(m1) #NS
+
+```
+
+

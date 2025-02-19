@@ -1,0 +1,312 @@
+---
+title: "08.Waltera"
+author: "Kelsey Huus"
+date: "2024-08-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+```
+
+```{r endpoint OD}
+endpoint <- read.csv("/ebio/abt3_projects2/uHEAT/data/Waltera/2024.CMC.Growth24OD.Results.csv")
+
+pdata <- endpoint %>% filter(Emulsifier!=0.1)
+pdata <- pdata %>% pivot_longer(cols=c(3:4), names_to="Species", values_to="OD600")
+pdata$Species <- gsub("WI.OD", "W. intestinalis", pdata$Species)
+pdata$Species <- gsub("WH.OD", "W. hominis", pdata$Species)
+
+p <- ggplot(pdata, aes(x=as.factor(Emulsifier), y=OD600)) + geom_boxplot() + geom_point()
+p <- p + facet_grid(.~Species)
+p <- p + xlab("CMC (%)")
+p
+
+```
+
+```{r growth curves multi}
+
+gc <- read.csv("/ebio/abt3_projects2/uHEAT/data/Waltera/Growth_curve_SHAKE_20240701_113201_forR.csv")
+gc
+gc <- gc %>% pivot_longer(cols=c(2:97), names_to="Condition", values_to="OD600")
+gc$Bacteria <- sapply(strsplit(gc$Condition, ".", fixed=TRUE),`[`, 1)
+gc$CMC <- ifelse(gc$Condition %in% gc[grep("CMC", gc$Condition),]$Condition, yes=0.5, no=0)
+gc
+gc$Condition2 <- paste(gc$Bacteria, gc$CMC, sep="_")
+
+se <- function(x) sd(x)/sqrt(length(x)) #standard error
+gc_plot <- gc %>% group_by(Time_h, Bacteria, CMC) %>%
+  summarize(SE=se(OD600),
+            OD600=mean(OD600))
+
+#pdf(width=4, height=4, "WalteraGrowthCurves/Wi_vs_others_CMC.pdf" )
+p <- ggplot(gc_plot, aes(x=Time_h, y=OD600, 
+                         ymin =OD600-SE, ymax = OD600+SE,
+                         colour=Bacteria, fill=Bacteria, shape=as.factor(CMC))) + geom_point(size=3, colour='black') + 
+  geom_errorbar() + 
+  scale_shape_manual(values=c(21,24)) + 
+  theme_bw()
+p
+#dev.off()
+
+#summary plot.
+gc_24h <- gc_plot %>% filter(Time_h>24 & Time_h<24.5)
+gc_24h
+gc_24h_rel <- pivot_wider(gc_24h, names_from=CMC, values_from=c(OD600, SE))
+gc_24h_rel$Relative_Growth <- gc_24h_rel$OD600_0.5 / gc_24h_rel$OD600_0
+
+#pdf(width=3, height=3, "/Users/khuus/ownCloud/KH-Postdoc/µHeat/Waltera/WalteraGrowthCurves/Wi_vs_others_CMC_simple.pdf" )
+p <- ggplot(gc_24h_rel, aes(x=Bacteria, y=Relative_Growth)) +
+  geom_point(size=3, colour='black') + 
+  annotate('segment', y=1, yend=1, x=0.5, xend=6.5, linetype=2) +
+  xlab("Bacterial Species") + ylab("Relative Growth in CMC") +
+  theme_minimal()
+p
+#dev.off()
+
+
+#rep2 gc
+gc2 <- read.csv("/ebio/abt3_projects2/uHEAT/data/Waltera/Waltera_and_friends_CMC_growthcurve_REP2.csv")
+gc2
+gc2 <- gc2 %>% pivot_longer(cols=c(2:97), names_to="Condition", values_to="OD600")
+gc2$Bacteria <- sapply(strsplit(gc2$Condition, ".", fixed=TRUE),`[`, 1)
+gc2$CMC <- ifelse(gc2$Condition %in% gc2[grep("CMC", gc2$Condition),]$Condition, yes=0.5, no=0)
+gc2
+gc2$Condition2 <- paste(gc2$Bacteria, gc2$CMC, sep="_")
+
+se <- function(x) sd(x)/sqrt(length(x)) #standard error
+gc2_plot <- gc2 %>% group_by(Time_h, Bacteria, CMC) %>%
+  summarize(SE=se(OD600),
+            OD600=mean(OD600))
+
+#pdf(width=4, height=4, "/ebio/abt3_projects2/uHEAT/data/Waltera/Wi_vs_others_CMC_rep2.pdf" )
+p <- ggplot(gc2_plot, aes(x=Time_h, y=OD600, 
+                         ymin =OD600-SE, ymax = OD600+SE,
+                         colour=Bacteria, fill=Bacteria, shape=as.factor(CMC))) + geom_point(size=3, colour='black') + 
+  geom_errorbar() + 
+  scale_shape_manual(values=c(21,24)) + 
+  theme_bw()
+p
+#dev.off()
+
+#rep3 gc
+gc3 <- read.csv("/ebio/abt3_projects2/uHEAT/data/Waltera/Waltera_and_friends_CMC_growthcurve_REP3.csv")
+gc3
+gc3 <- gc3 %>% pivot_longer(cols=c(2:97), names_to="Condition", values_to="OD600")
+gc3$Bacteria <- sapply(strsplit(gc3$Condition, ".", fixed=TRUE),`[`, 1)
+gc3$CMC <- ifelse(gc3$Condition %in% gc3[grep("CMC", gc3$Condition),]$Condition, yes=0.5, no=0)
+gc3
+gc3$Condition2 <- paste(gc3$Bacteria, gc3$CMC, sep="_")
+
+se <- function(x) sd(x)/sqrt(length(x)) #standard error
+gc3_plot <- gc3 %>% group_by(Time_h, Bacteria, CMC) %>%
+  summarize(SE=se(OD600),
+            OD600=mean(OD600))
+
+#pdf(width=4, height=4, "/ebio/abt3_projects2/uHEAT/data/Waltera/Wi_vs_others_CMC_rep2.pdf" )
+p <- ggplot(gc3_plot, aes(x=Time_h, y=OD600, 
+                         ymin =OD600-SE, ymax = OD600+SE,
+                         colour=Bacteria, fill=Bacteria, shape=as.factor(CMC))) + geom_point(size=3, colour='black') + 
+  geom_errorbar() + 
+  scale_shape_manual(values=c(21,24)) + 
+  theme_bw()
+p
+#dev.off()
+
+
+#summary plot all reps
+gc2_24h <- gc2_plot %>% filter(Time_h>24 & Time_h<24.5)
+gc2_24h
+gc2_24h_rel <- pivot_wider(gc2_24h, names_from=CMC, values_from=c(OD600, SE))
+gc2_24h_rel$Relative_Growth <- gc2_24h_rel$OD600_0.5 / gc2_24h_rel$OD600_0
+
+gc3_24h <- gc3_plot %>% filter(Time_h>24 & Time_h<24.5)
+gc3_24h
+gc3_24h_rel <- pivot_wider(gc3_24h, names_from=CMC, values_from=c(OD600, SE))
+gc3_24h_rel$Relative_Growth <- gc3_24h_rel$OD600_0.5 / gc3_24h_rel$OD600_0
+
+
+gc_24h_rel$Rep <- c("Rep1")
+gc2_24h_rel$Rep <- c("Rep2")
+gc3_24h_rel$Rep <- c("Rep3")
+
+gc_all_plot <- Reduce(full_join, list(gc_24h_rel, gc2_24h_rel, gc3_24h_rel))
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/Waltera/Wi_vs_others_CMC_simple_reps12.pdf" )
+p <- ggplot(gc_all_plot, aes(x=Bacteria, y=Relative_Growth)) +
+  geom_point(size=3, colour='black') + 
+  annotate('segment', y=1, yend=1, x=0.5, xend=6.5, linetype=2) +
+  xlab("Bacterial Species") + ylab("Relative Growth in CMC") +
+  theme_minimal()
+p
+#dev.off()
+
+#make a summary-summary version with mean and SE
+gc_plot_summary <- gc_all_plot %>% 
+  dplyr::group_by(Bacteria) %>%
+  dplyr::summarize(mean=mean(Relative_Growth), se=se(Relative_Growth))
+
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/Waltera/Wi_vs_others_CMC_simple_reps123.pdf")
+p <- ggplot(gc_plot_summary, aes(x=Bacteria, y=mean)) +
+  geom_point(size=3, colour='black') + 
+  geom_errorbar(aes(ymin=mean-se, ymax=mean+se), width=.2,
+                 position=position_dodge(0.05)) +
+  annotate('segment', y=1, yend=1, x=0.5, xend=6.5, linetype=2) +
+  xlab("Bacterial Species") + ylab("Relative Growth in CMC") +
+  theme_minimal()
+p
+#dev.off()
+
+
+```
+
+```{r qpcr}
+qpcr <- read.csv("/ebio/abt3_projects2/uHEAT/data/Waltera/foldchanges_summary.csv")
+
+pdata <- qpcr %>% pivot_longer(cols=c(1:2), names_to="Concentration", values_to = "Fold_Change")
+pdata$Concentration <- ifelse(pdata$Concentration=="X0.5..CMC", yes=0.5, no=0)
+pdata$Fold_Change <- as.numeric(pdata$Fold_Change)
+
+p <- ggplot(pdata, aes(x=as.factor(Concentration), y=Fold_Change)) + geom_boxplot() + geom_jitter(width=0.1, height=0)
+p <- p + xlab("CMC (%)")
+p
+
+```
+
+```{r cell results}
+wcell <- read.csv("/ebio/abt3_projects2/uHEAT/data/Waltera/Waltera_cellresults_R.csv")
+wcell
+
+#make 3 different plots for each cell
+wcell_htlr5 <- wcell %>% filter(Cell=="hTLR5") %>%
+  dplyr::select(-c(FliC)) %>%
+  pivot_longer(cols=c(1:2), names_to="Condition", values_to = "FliC")
+
+wilcox.test(wcell_htlr5$FliC~wcell_htlr5$Condition)
+
+#pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/5G.WalteraFliC.pdf")
+p <- ggplot(wcell_htlr5, aes(x=Condition, y=FliC)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0, size=3) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab(NULL) + ylab("FliC (µg/mL)") +
+  annotate('segment', x=1, xend=2, y=0.8, yend=0.8) + 
+  annotate('text', x=1.5, y=0.82, label="*", size=5) 
+p
+#dev.off()
+
+wcell_orga <- wcell %>% filter(Cell=="Organoid") %>%
+  pivot_longer(cols=c(1:5), names_to="Condition", values_to = "IL8")
+
+tdata <- wcell_orga %>% filter(Condition %in% c("Wi", "PBS"))
+wilcox.test(tdata$IL8~tdata$Condition)
+
+wcell_orga$Condition <- factor(wcell_orga$Condition, levels=c("PBS", "Wi", "LPS", "Calprotectin", "FliC"))
+
+#pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/5H.WalteraOrganoid_v2.pdf")
+p <- ggplot(tdata, aes(x=Condition, y=IL8)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0, size=3) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab(NULL) + ylab("IL-8 (pg/mL)") +
+  annotate('segment', x=1, xend=2, y=1625, yend=1625) + 
+  annotate('text', x=1.5, y=1650, label="*", size=5) 
+p
+#dev.off()
+
+wcell_pbmc1 <- wcell %>% filter(Cell=="PBMC"&Cytokine=="IL1B") %>%
+  pivot_longer(cols=c(1:3), names_to="Condition", values_to = "IL1B")
+
+tdata <- wcell_pbmc1 %>% filter(Condition %in% c("Wi", "PBS"))
+wilcox.test(tdata$IL1B~tdata$Condition)
+
+wcell_pbmc1$Condition <- factor(wcell_pbmc1$Condition, levels=c("PBS", "Wi", "FliC"))
+
+#pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/5I.WalteraPBMC_v2.pdf")
+p <- ggplot(tdata, aes(x=Condition, y=IL1B)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0, size=3) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab(NULL) + ylab("IL-1B (pg/mL)") +
+  annotate('segment', x=1, xend=2, y=9.5, yend=9.5) + 
+  annotate('text', x=1.5, y=10, label="p=0.05") 
+p
+#dev.off()
+
+wcell_pbmc2 <- wcell %>% filter(Cell=="PBMC"&Cytokine=="IL18") %>%
+  pivot_longer(cols=c(1:3), names_to="Condition", values_to = "IL18")
+
+tdata <- wcell_pbmc2 %>% filter(Condition %in% c("Wi", "PBS"))
+wilcox.test(tdata$IL18~tdata$Condition)
+
+wcell_pbmc2$Condition <- factor(wcell_pbmc2$Condition, levels=c("PBS", "Wi", "FliC"))
+
+#pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/5#.WalteraPBMCIL18.pdf")
+p <- ggplot(tdata, aes(x=Condition, y=log(IL18))) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab(NULL) + ylab("IL-18 (Log pg/mL)")+
+  annotate('segment', x=1, xend=2, y=3.6, yend=3.6) + 
+  annotate('text', x=1.5, y=3.8, label="p=0.3")
+p
+#dev.off()
+
+
+
+```
+
+
+```{r flagellin}
+#FliC quantification (Fig 6F)
+
+flic <- read.csv("/ebio/abt3_projects2/uHEAT/data/Waltera/24.10.31.WalteraPrepshTLR5_forR.csv")
+flic <- pivot_longer(flic, cols=c(1:2), names_to="CMC", values_to="FliC")
+flic$CMC <- gsub("CMC_", "", flic$CMC)
+
+wilcox.test(flic$FliC~as.factor(flic$CMC))
+dplyr::count(flic, as.factor(CMC))
+
+#pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/6F.WalteraFliC.pdf")
+p <- ggplot(flic, aes(x=as.factor(CMC), y=FliC)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab("% CMC") + ylab("Relative FliC Production") +
+  annotate('segment', x=1, xend=2, y=3.5, yend=3.5) + 
+  annotate('text', x=1.5, y=3.75, label="***", size=5) +
+    annotate('segment', x=0.25, xend=2.75, y=1, yend=1, linetype='dashed')
+p
+#dev.off()
+
+#flagellin length quantification (Fig 6I)
+flag <- read.csv("/ebio/abt3_projects2/uHEAT/data/Waltera/Flagella_per_cell_Waltera_forR.csv")
+flag <- pivot_longer(flag, cols=c(1:2), names_to="CMC", values_to="flag")
+flag$CMC <- gsub("CMC_", "", flag$CMC)
+
+wilcox.test(flag$flag~as.factor(flag$CMC))
+dplyr::count(flag, as.factor(CMC))
+
+#pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/6I.WalteraFlagellin.pdf")
+p <- ggplot(flag, aes(x=as.factor(CMC), y=flag)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab("% CMC") + ylab("µm flagellin / bacterium") +
+  annotate('segment', x=1, xend=2, y=47, yend=47) + 
+  annotate('text', x=1.5, y=49, label="*", size=5)
+p
+#dev.off()
+
+
+```
