@@ -1,0 +1,1071 @@
+---
+title: "05.Somalogic"
+author: "Kelsey Huus"
+date: "2024-07-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+##Packages
+library(dplyr)
+library(ggplot2)
+#library(data.table)
+library(tidyr)
+library(SomaDataIO)
+library(Maaslin2)
+library(ggrepel)
+```
+
+```{r soma targets}
+#import the selected list of 1500 metabolites with associated panel annotations
+custom_panel <- read.delim("/ebio/abt3_projects2/uHEAT2/data/somalogic/finalcuratedpanelKR.txt")
+custom_panel
+
+#select the relevant columns for export and make an excel-friendly SeqID
+custom_panel$SOMAmer.SeqId_ExcelFriendly <- gsub("-", "_", custom_panel$SOMAmer.SeqId, fixed=TRUE)
+custom_panel <- custom_panel %>% dplyr::select(SOMAmer.SeqId, Target.Name, Human.Target.or.Analyte, 
+                                               UniProtID, GeneID, SOMAmer.SeqId_ExcelFriendly)
+#write.csv(custom_panel, "/ebio/abt3_projects2/uHEAT/data/SupplementalTables/S#_SomalogicCustomPanel.csv")
+
+```
+
+```{r import soma}
+#read in the normalized data from somalogic
+soma_norm <- read_adat("/ebio/abt3_projects2/uHEAT2/data/somalogic/Somalogic_Data_ANMLNorm.adat")
+soma_norm
+#import regular metadata
+#updated: this version also excludes SERIES 2 of all double series.
+meta_seq <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/meta_seq_clean_series1.24.08.18.csv", 
+                     row.names=1)
+
+meta_seq <- meta_seq %>% filter(!is.na(fever7d_aboveavg))
+length(meta_seq$SampleID)
+
+#per-person metadata, matching
+meta <- meta_seq %>% filter(!duplicated(Participant_ID)&!is.na(fever7d_aboveavg)) %>%
+  dplyr::select(-c(SampleID, Relative_Day, Time0, Time01))
+length(meta$Participant_ID) #final number of participants
+
+#define DIET 3
+meta$Diet3 <- ifelse(meta$Diet %in% c("Vegan", "Vegetarian"), yes="Veg", no="Omni")
+meta_seq$Diet3 <- ifelse(meta_seq$Diet %in% c("Vegan", "Vegetarian"), yes="Veg", no="Omni")
+
+#see this vignette for info on the file.
+#https://rdrr.io/github/SomaLogic/SomaDataIO/f/vignettes/loading-and-wrangling.Rmd 
+soma_map <- as.data.frame(attr(soma_norm, "Col.Meta"))
+
+soma_data_norm <- as.data.frame(soma_norm)
+
+#extract the buffer samples that I can use later to set LOD
+soma_data_blanks <- soma_data_norm %>% filter(SampleType=="Buffer")
+#View(soma_data_blanks) #the overall numbers do seem to be low...
+
+#take only my samples (norm).
+soma_data_norm[grep("B", soma_data_norm$SampleId),]$SampleId #this works. #H does not work - Ronald has some H's
+soma_data_norm <- soma_data_norm[grep("B", soma_data_norm$SampleId),]
+row.names(soma_data_norm) <- soma_data_norm$SampleId 
+#before splitting the df: based on discussion with Somalogic - remove only the flagged samples, otherwise it should be okay
+soma_data_norm <- soma_data_norm %>% filter(RowCheck=="PASS")
+#select only the actual metabolite columns.
+names(soma_data_norm)
+names(soma_data_norm)[1:33] #the metadata columns.
+names(soma_data_norm)[34:length(names(soma_data_norm))] #the 1500 proteins
+soma_meta <- soma_data_norm[,c(1:33)]
+soma_data_norm <- soma_data_norm[,c(34:length(names(soma_data_norm)))]
+
+#inspect the type of data that we have. (*normalized)
+head(as.data.frame(soma_data_norm)) #OK 
+rowSums(soma_data_norm)
+colSums(soma_data_norm)
+sum(is.na(soma_data_norm)) #there do not appear to be any NA values.
+
+#align with metadata file via subject ID
+meta <- meta_seq %>% filter(!duplicated(Participant_ID))
+soma_meta <- soma_meta %>% rename(Participant_ID=SubjectID, Soma_SampleID = SampleId)
+soma_meta <- full_join(soma_meta, meta)
+head(soma_meta)
+soma_meta <- soma_meta %>% filter(!is.na(Soma_SampleID)) #get rid of extra samples. One extra NA row snuck in
+soma_meta$Blood <- sapply(strsplit(soma_meta$Soma_SampleID,"_"), `[`, 3)
+
+#soma map; make a column-matching name
+soma_map$SomaSeqId <- paste("seq", soma_map$SeqId, sep=".")
+soma_map$SomaSeqId <- gsub("-", ".", soma_map$SomaSeqId, fixed=TRUE)
+
+##remove hybridization controls from the possible metabolites
+#before removing blanks: make sure the ACTUAL blank metabolites, hybridization control elutions, are removed.
+dplyr::count(soma_map, Type)
+soma_map <- soma_map %>% filter(Type=="Protein")
+dim(soma_data_norm)
+soma_data_norm <- soma_data_norm[,which(names(soma_data_norm)%in%soma_map$SomaSeqId)]
+dim(soma_data_norm) #removed those 12 non-protein samples.
+soma_data_blanks <- soma_data_blanks[,which(names(soma_data_blanks)%in%soma_map$SomaSeqId)]
+
+#write.csv(soma_map, "/ebio/abt3_projects2/uHEAT2/data/somalogic/soma_map.csv")
+
+#matching the dataframes: double check. #use normalized data only.
+identical(names(soma_data_norm), soma_map$SomaSeqId)
+#Maaslin expects the opposite orientation - samples as column names.
+soma_data_norm_t <- as.data.frame(t(soma_data_norm))
+identical(soma_meta$Soma_SampleID, names(soma_data_norm_t))
+identical(soma_map$SomaSeqId, row.names(soma_data_norm_t))
+row.names(soma_meta) <- soma_meta$Soma_SampleID
+
+#these data frames contain B1 and B2/B3.
+#baseline only:
+soma_meta_baseline <- soma_meta %>% filter(Blood=="B1")
+soma_data_norm_baseline <- soma_data_norm[row.names(soma_data_norm)%in%soma_meta_baseline$Soma_SampleID,]
+soma_data_norm_baseline_t <- as.data.frame(t(soma_data_norm_baseline))
+identical(soma_meta_baseline$Soma_SampleID, names(soma_data_norm_baseline_t))
+row.names(soma_meta_baseline) <- soma_meta_baseline$Soma_SampleID
+#now everything matches. So it should be quite a simple matter of running Maaslin2. 
+#so that fever-hi is compared to low and not v.v.
+soma_meta$fever7d_aboveavg <- factor(soma_meta$fever7d_aboveavg, levels=c("lo", "hi"))
+
+#write out cleaned baseline data for other analyses, e.g. multi omics integration
+#before writing it out, transform somalogic IDs to participant IDs
+#identical(row.names(soma_data_norm_baseline), soma_meta_baseline$Soma_SampleID)
+#row.names(soma_data_norm_baseline) <- soma_meta_baseline$Participant_ID
+#write.csv(soma_data_norm_baseline, "/ebio/abt3_projects2/uHEAT2/data/somalogic/soma_baseline_clean.csv")
+
+
+```
+
+```{r soma targeted wilcoxon}
+#pick simply the main cytokines
+my_cytokines <- c("IL-1b", "IL-1a", "IL-2", "IL-4", "IL-6", "IL-8", "IL-10", "IL-12", "IL-18", 
+                  "IL-22", "IL-17",
+                  "IFN-g", "IFN-b", "TNF-a") 
+my_immunoglobulins <- c("IgG", "IgA", "IgM", "IgD", "IgE")
+my_markers <- c("LBP", "HPT", "FABP2", #HPT = haptoglobin isoform 2 = zonulin (gut leakiness.?) #FABP2 should also = leak
+                "PGES2", "COX-2", "CRP") #LPS binding, leakiness markers, and 2 prostaglandins #and CRP
+my_tlrs <- c("TLR5", "TLR3", "TLR4", "TLR2", "TLR7", "TLR9") #I added TLR9 because maybe it has to do with IL17 #and TLR3 because viruses
+
+#selected cytokines for the baseline samples only
+soma_map_small <- soma_map %>% filter(Target %in% c(my_cytokines, my_immunoglobulins)) #start with just cytokines and Igs
+soma_data_norm_t_small <- soma_data_norm_t[which(row.names(soma_data_norm_t) %in% soma_map_small$SomaSeqId),]
+soma_data_norm_t_baseline_small <- soma_data_norm_baseline_t[which(row.names(soma_data_norm_baseline_t) %in% soma_map_small$SomaSeqId),]
+identical(names(soma_data_norm_t_baseline_small), soma_meta_baseline$Soma_SampleID)
+#how many did I test
+length(soma_map_small$Target)
+
+#multiple wilcoxens
+MW.p = apply(soma_data_norm_t_baseline_small,1,
+             function(x) wilcox.test(c(x)~soma_meta_baseline$fever7d_aboveavg)$p.value)
+MW.coef = apply(soma_data_norm_t_baseline_small,1,
+                function(x) wilcox.test(c(x)~soma_meta_baseline$fever7d_aboveavg)$statistic)
+pres <- data.frame(SomaSeqId=names(MW.p), pval=MW.p, coef=MW.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+pres[order(pres$qval),] #ooh one of them is very significant!
+
+targeted_results <- pres %>% full_join(soma_map_small)
+targeted_results <- targeted_results[order(targeted_results$pval),]
+head(targeted_results)
+
+#wilcoxen, untargeted.
+identical(names(soma_data_norm_baseline_t), soma_meta_baseline$Soma_SampleID)
+#how many did I test
+length(soma_map$Target)
+
+#multiple wilcoxens
+MW.p2 = apply(soma_data_norm_baseline_t,1,
+             function(x) wilcox.test(c(x)~soma_meta_baseline$fever7d_aboveavg)$p.value)
+MW.coef2 = apply(soma_data_norm_baseline_t,1,
+                function(x) wilcox.test(c(x)~soma_meta_baseline$fever7d_aboveavg)$statistic)
+pres2 <- data.frame(SomaSeqId=names(MW.p2), pval=MW.p2, coef=MW.coef2)
+pres2$qval <- p.adjust(pres2$pval, method='fdr')
+pres2[order(pres2$qval),] #ooh one of them is very significant!
+
+untargeted_results_w <- pres2 %>% full_join(soma_map)
+untargeted_results_w <- untargeted_results_w[order(untargeted_results_w$pval),]
+head(untargeted_results_w)
+#very similar to Maaslin2 results.
+
+```
+
+```{r soma maaslin2 with and without covariates fever}
+
+soma_meta_baseline$fever7d_aboveavg <- factor(soma_meta_baseline$fever7d_aboveavg, levels=c("lo", "hi"))
+
+model_fever_norm = Maaslin2(
+  input_data = soma_data_norm_baseline_t, 
+  input_metadata = soma_meta_baseline, 
+  output = "maaslin2_output", 
+  fixed_effects = c("fever7d_aboveavg"), 
+  #random_effects = c("Participant_ID"), #only Baseline
+  normalization="none", #do not further normalize the data as it is already
+  transform="log", #but log transform
+  #min_abundance=0.0001, #no reasonable min abund exists
+  min_prevalence=0.25, #must be present in 25% of samples #but there are no zeroes in this data
+  max_significance=0.05, 
+  plot_scatter=FALSE
+)
+fever_res <- model_fever_norm$results
+fever_res %>% filter(qval<0.1) #hey! there is a single hit! 
+fever_res %>% filter(pval<0.05) #and the p values are generally better
+
+#export
+fever_res <- fever_res %>% 
+  rename(SomaSeqId=feature) %>%
+  full_join(soma_map) %>%
+  filter(!is.na(qval))
+#write.csv(fever_res, "/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/Soma_maaslin2_b1_fever.csv")
+
+#age / sex  + fever
+model_fever_corr = Maaslin2(
+  input_data = soma_data_norm_baseline_t, 
+  input_metadata = soma_meta_baseline, 
+  output = "maaslin2_output", 
+  fixed_effects = c("Sex", "Age", "fever7d_aboveavg"), 
+  #random_effects = c("Participant_ID"), #only Baseline
+  reference=c("Sex", "m"), #male as ref for Sex
+  normalization="none", #do not further normalize the data
+  transform="log", #but log transform
+  #min_abundance=0.0001, #no reasonable min abund exists
+  min_prevalence=0.25, #must be present in 25% of samples #but there are no zeroes in this data
+  max_significance=0.05, 
+  plot_scatter=FALSE
+)
+fever_corr1 <- model_fever_corr$results
+fever_corr1 %>% filter(qval<0.05&metadata=="fever7d_aboveavg") #
+
+#export
+fever_corr1 <- fever_corr1 %>% 
+  rename(SomaSeqId=feature) %>%
+  full_join(soma_map) %>%
+  filter(!is.na(qval))
+#write.csv(fever_corr1, "/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/Soma_maaslin2_b1_sex_age_fever.csv")
+
+#age / sex / diet + fever
+model_fever_corr = Maaslin2(
+  input_data = soma_data_norm_baseline_t, 
+  input_metadata = soma_meta_baseline, 
+  output = "maaslin2_output", 
+  fixed_effects = c("Sex", "Age", "Diet3", "fever7d_aboveavg"), 
+  #random_effects = c("Participant_ID"), #only Baseline
+  reference=c("Sex", "m"), #male as ref for Sex
+  normalization="none", #do not further normalize the data
+  transform="log", #but log transform
+  #min_abundance=0.0001, #no reasonable min abund exists
+  min_prevalence=0.25, #must be present in 25% of samples #but there are no zeroes in this data
+  max_significance=0.05, 
+  plot_scatter=FALSE
+)
+fever_corr2 <- model_fever_corr$results
+fever_corr2 %>% filter(qval<0.05&metadata=="fever7d_aboveavg") #
+
+#export
+fever_corr2 <- fever_corr2 %>% 
+  rename(SomaSeqId=feature) %>%
+  full_join(soma_map) %>%
+  filter(!is.na(qval))
+#write.csv(fever_corr2, "/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/Soma_maaslin2_b1_sex_age_diet3_fever.csv")
+
+##ADDITIONAL COVARIATES: CONTROL FOR IgG_B1 : 
+identical(names(soma_data_norm_baseline_t), soma_meta_baseline$Soma_SampleID)
+#diet / age / sex / IgG + fever
+model_fever_corr = Maaslin2(
+  input_data = soma_data_norm_baseline_t, 
+  input_metadata = soma_meta_baseline, 
+  output = "maaslin2_output", 
+  fixed_effects = c("Sex", "Age", "IgG_B1", "fever7d_aboveavg"), 
+  #random_effects = c("Participant_ID"), #only Baseline
+  reference=c("Sex", "m"), #male as ref for Sex
+  normalization="none", #do not further normalize the data
+  transform="log", #but log transform
+  #min_abundance=0.0001, #no reasonable min abund exists
+  min_prevalence=0.25, #must be present in 25% of samples #but there are no zeroes in this data
+  max_significance=0.05, 
+  plot_scatter=FALSE
+)
+fever_corr3 <- model_fever_corr$results
+fever_corr3 %>% filter(qval<0.05&metadata=="fever7d_aboveavg") #
+
+fever_corr3_hits <- fever_corr3 %>% filter(qval<0.1&metadata=="fever7d_aboveavg") %>% 
+  rename(SomaSeqId=feature) %>%
+  full_join(soma_map) %>%
+  filter(!is.na(qval))
+fever_corr3_hits #actually, generally the same hits
+write.csv(fever_corr3_hits, "/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_FINAL/maaslin2_output/Soma_maaslin2_hits_norm_baseline_sex_age_igg_fever.csv")
+
+#export
+fever_corr3 <- fever_corr3 %>% 
+  rename(SomaSeqId=feature) %>%
+  full_join(soma_map) %>%
+  filter(!is.na(qval))
+write.csv(fever_corr3, "/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_FINAL/maaslin2_output/Soma_maaslin2_b1_sex_age_igg_fever.csv")
+
+#diet / age / sex / igg1 + diet + fever
+model_fever_corr = Maaslin2(
+  input_data = soma_data_norm_baseline_t, 
+  input_metadata = soma_meta_baseline, 
+  output = "maaslin2_output", 
+  fixed_effects = c("Sex", "Age", "IgG_B1", "Diet3", "fever7d_aboveavg"), 
+  #random_effects = c("Participant_ID"), #only Baseline
+  reference=c("Sex", "m"), #male as ref for Sex
+  normalization="none", #do not further normalize the data
+  transform="log", #but log transform
+  #min_abundance=0.0001, #no reasonable min abund exists
+  min_prevalence=0.25, #must be present in 25% of samples #but there are no zeroes in this data
+  max_significance=0.05, 
+  plot_scatter=FALSE
+)
+fever_corr3 <- model_fever_corr$results
+fever_corr3 %>% filter(qval<0.05&metadata=="fever7d_aboveavg") #
+
+#export
+fever_corr3 <- fever_corr3 %>% 
+  rename(SomaSeqId=feature) %>%
+  full_join(soma_map) %>%
+  filter(!is.na(qval))
+#write.csv(fever_corr3, "/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_FINAL/maaslin2_output/Soma_maaslin2_b1_sex_age_igg1_diet3_fever.csv")
+
+
+```
+
+```{r soma plots2 volcano no covariates}
+#instead of a tile plot, do a volcano plot for the soma hits
+fever_hits_raw <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/Soma_maaslin2_b1_fever.csv", row.names=1)
+fever_hits_raw
+
+mycolours <- c("deepskyblue4", "deepskyblue3", "firebrick4", "firebrick2", "grey")
+names(mycolours) <- c("DOWN q<0.05", "DOWN q<0.1", "UP q<0.05", "UP q<0.1",  "NO")
+fever_hits_raw$diffexpressed <- c("NO")
+fever_hits_raw$diffexpressed[fever_hits_raw$coef > 0 & fever_hits_raw$qval<0.1] <- c("UP q<0.1")
+fever_hits_raw$diffexpressed[fever_hits_raw$coef > 0 & fever_hits_raw$qval<0.05] <- c("UP q<0.05")
+fever_hits_raw$diffexpressed[fever_hits_raw$coef < 0 & fever_hits_raw$qval<0.1] <- c("DOWN q<0.1")
+fever_hits_raw$diffexpressed[fever_hits_raw$coef < 0 & fever_hits_raw$qval<0.05] <- c("DOWN q<0.05")
+
+# Create a new column "delabel" to de, that will contain the name of genes differentially expressed 
+fever_hits_raw$delabel <- ifelse(fever_hits_raw$diffexpressed!="NO",
+                          yes=fever_hits_raw$Target, no=NA)
+
+
+#pdf(width=6, height=5, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/2C.SomaFeverVolcano.pdf")
+p = ggplot(data=fever_hits_raw, aes(x=coef, y=-log10(pval), 
+                              col=diffexpressed, 
+                              label=delabel)) + 
+  ggtitle("Serum Proteomics: Fever Hi vs Lo") +
+  scale_colour_manual(values = mycolours) + 
+  geom_point(size=0.3) + 
+  theme_bw() +
+  guides(fill = guide_legend(override.aes = aes(label = ""))) + 
+  geom_text_repel(size=2,  max.overlaps = 30, segment.size=0.2, show.legend = FALSE)
+#    geom_text(size=2)
+p
+#dev.off()
+
+#list all significant hits to check annotations / labels
+h1 <- fever_hits_raw %>% filter(qval<0.1) %>% dplyr::select(Target, TargetFullName, EntrezGeneSymbol, pval, qval, coef, diffexpressed)
+h1$Covariates <- c("None")
+h1
+
+```
+
+```{r soma plots2 volcano sex age}
+#instead of a tile plot, do a volcano plot for the soma hits
+fever_hits_raw <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/Soma_maaslin2_b1_sex_age_fever.csv", row.names=1)
+fever_hits_raw <- fever_hits_raw %>% filter(metadata=="fever7d_aboveavg")
+
+mycolours <- c("deepskyblue4", "deepskyblue3", "firebrick4", "firebrick2", "grey")
+names(mycolours) <- c("DOWN q<0.05", "DOWN q<0.1", "UP q<0.05", "UP q<0.1",  "NO")
+fever_hits_raw$diffexpressed <- c("NO")
+fever_hits_raw$diffexpressed[fever_hits_raw$coef > 0 & fever_hits_raw$qval<0.1] <- c("UP q<0.1")
+fever_hits_raw$diffexpressed[fever_hits_raw$coef > 0 & fever_hits_raw$qval<0.05] <- c("UP q<0.05")
+fever_hits_raw$diffexpressed[fever_hits_raw$coef < 0 & fever_hits_raw$qval<0.1] <- c("DOWN q<0.1")
+fever_hits_raw$diffexpressed[fever_hits_raw$coef < 0 & fever_hits_raw$qval<0.05] <- c("DOWN q<0.05")
+
+# Create a new column "delabel" to de, that will contain the name of genes differentially expressed 
+fever_hits_raw$delabel <- ifelse(fever_hits_raw$diffexpressed!="NO",
+                          yes=fever_hits_raw$EntrezGeneSymbol, no=NA)
+#annotate the ApoE proteins more completely (1-4)
+fever_hits_raw$delabel <- ifelse(fever_hits_raw$delabel=="APOE", 
+                                 yes=gsub("Apo ", "APO", fever_hits_raw$Target, fixed=TRUE),
+                                 no=fever_hits_raw$delabel)
+
+#considered adjusting plot to qval lines but I think it doesn't improve visibility
+
+#pdf(width=5, height=3.5, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/2F.SomaVolcano.SexAgeFever.pdf")
+p = ggplot(data=fever_hits_raw, aes(x=coef, y=-log10(pval), 
+                              col=diffexpressed, 
+                              label=delabel)) + 
+  ggtitle("Serum Proteomics: Fever-hi vs lo") +
+  scale_colour_manual(values = mycolours) + 
+  geom_point(size=0.3) + 
+  theme_bw() +
+  guides(fill = guide_legend(override.aes = aes(label = ""))) + 
+  geom_text_repel(size=2,  max.overlaps = 30, segment.size=0.2, show.legend = FALSE)
+  #geom_hline(yintercept=-log10(0.05), linetype="dashed") +
+  #geom_hline(yintercept=-log10(0.1), linetype="dashed")
+#    geom_text(size=2)
+p
+#dev.off()
+
+#list all significant hits to check annotations / labels
+h2 <- fever_hits_raw %>% filter(qval<0.1) %>% dplyr::select(Target, TargetFullName, EntrezGeneSymbol, pval, qval, coef, diffexpressed)
+h2$Covariates <- c("SexAge")
+h2
+
+```
+
+```{r soma plots2 volcano sex age igg1}
+#instead of a tile plot, do a volcano plot for the soma hits
+fever_hits_raw <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_FINAL/maaslin2_output/Soma_maaslin2_b1_sex_age_igg_fever.csv", row.names=1)
+fever_hits_raw <- fever_hits_raw %>% filter(metadata!="IgG_B1") %>% mutate(qval2=p.adjust(pval, method='fdr')) %>%
+  filter(metadata=="fever7d_aboveavg") #because of the way Maaslin2 corrects qvals for ALL covariates, remove IgGB1 from the correction to make it comparable to before 
+
+mycolours <- c("deepskyblue4", "deepskyblue3", "firebrick4", "firebrick2", "grey")
+names(mycolours) <- c("DOWN q<0.05", "DOWN q<0.1", "UP q<0.05", "UP q<0.1",  "NO")
+fever_hits_raw$diffexpressed <- c("NO")
+fever_hits_raw$diffexpressed[fever_hits_raw$coef > 0 & fever_hits_raw$qval<0.1] <- c("UP q<0.1")
+fever_hits_raw$diffexpressed[fever_hits_raw$coef > 0 & fever_hits_raw$qval<0.05] <- c("UP q<0.05")
+fever_hits_raw$diffexpressed[fever_hits_raw$coef < 0 & fever_hits_raw$qval<0.1] <- c("DOWN q<0.1")
+fever_hits_raw$diffexpressed[fever_hits_raw$coef < 0 & fever_hits_raw$qval<0.05] <- c("DOWN q<0.05")
+
+# Create a new column "delabel" to de, that will contain the name of genes differentially expressed 
+fever_hits_raw$delabel <- ifelse(fever_hits_raw$diffexpressed!="NO",
+                          yes=fever_hits_raw$EntrezGeneSymbol, no=NA)
+#annotate the ApoE proteins more completely (1-4)
+fever_hits_raw$delabel <- ifelse(fever_hits_raw$delabel=="APOE", 
+                                 yes=gsub("Apo ", "APO", fever_hits_raw$Target, fixed=TRUE),
+                                 no=fever_hits_raw$delabel)
+
+#considered adjusting plot to qval lines but I think it doesn't improve visibility
+
+#pdf(width=5, height=3.5, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/2D.SomaVolcano.SexAgeFever.pdf")
+p = ggplot(data=fever_hits_raw, aes(x=coef, y=-log10(pval), 
+                              col=diffexpressed, 
+                              label=delabel)) + 
+  ggtitle("Serum Proteomics: Fever-hi vs lo") +
+  scale_colour_manual(values = mycolours) + 
+  geom_point(size=0.3) + 
+  theme_bw() +
+  guides(fill = guide_legend(override.aes = aes(label = ""))) + 
+  geom_text_repel(size=2,  max.overlaps = 30, segment.size=0.2, show.legend = FALSE)
+  #geom_hline(yintercept=-log10(0.05), linetype="dashed") +
+  #geom_hline(yintercept=-log10(0.1), linetype="dashed")
+#    geom_text(size=2)
+p
+#dev.off()
+
+#list all significant hits to check annotations / labels
+h2 <- fever_hits_raw %>% filter(qval<0.1) %>% dplyr::select(Target, TargetFullName, EntrezGeneSymbol, pval, qval, coef, diffexpressed)
+h2$Covariates <- c("SexAgeIgG1")
+h2
+#write out for supplementary table
+write.csv(h2, "/ebio/abt3_projects2/uHEAT/code/R_code/Rscripts_server/maaslin2_output/Soma_Maaslin2_SexAgeIgG1Fever7d_hitsforSTable.csv")
+
+h3 <- fever_hits_raw %>% filter(qval2<0.2) %>% dplyr::select(Target, TargetFullName, EntrezGeneSymbol, pval, qval, qval2, coef, diffexpressed)
+h3$Covariates <- c("SexAgeIgG1")
+h3
+
+```
+
+```{r soma plots2 volcano sex age diet}
+#instead of a tile plot, do a volcano plot for the soma hits
+fever_corr_hits_raw <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/Soma_maaslin2_b1_sex_age_diet3_fever.csv", row.names=1)
+fever_corr_hits_raw <- fever_corr_hits_raw %>% filter(metadata=="fever7d_aboveavg")
+
+mycolours <- c("deepskyblue4", "deepskyblue3", "firebrick4", "firebrick2", "grey")
+names(mycolours) <- c("DOWN q<0.05", "DOWN q<0.1", "UP q<0.05", "UP q<0.1",  "NO")
+fever_corr_hits_raw$diffexpressed <- c("NO")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef > 0 & fever_corr_hits_raw$qval<0.1] <- c("UP q<0.1")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef > 0 & fever_corr_hits_raw$qval<0.05] <- c("UP q<0.05")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef < 0 & fever_corr_hits_raw$qval<0.1] <- c("DOWN q<0.1")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef < 0 & fever_corr_hits_raw$qval<0.05] <- c("DOWN q<0.05")
+
+# Create a new column "delabel" to de, that will contain the name of genes differentially expressed 
+fever_corr_hits_raw$delabel <- ifelse(fever_corr_hits_raw$diffexpressed!="NO",
+                          yes=fever_corr_hits_raw$Target, no=NA)
+
+#pdf(width=6, height=5, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/2C.SomaFeverVolcano.pdf")
+p = ggplot(data=fever_corr_hits_raw, aes(x=coef, y=-log10(pval), 
+                              col=diffexpressed, 
+                              label=delabel)) + 
+  ggtitle("Serum Proteomics: Fever Hi vs Lo") +
+  scale_colour_manual(values = mycolours) + 
+  geom_point(size=0.3) + 
+  theme_bw() +
+  geom_text_repel(size=2,  max.overlaps = 30, segment.size=0.2, show.legend = FALSE) 
+p
+#dev.off()
+
+#export a version specifically for the legend only for all volcano plots (larger points)
+#pdf(width=6, height=5, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/2C.SomaFeverVolcano_LEGEND.pdf")
+p = ggplot(data=fever_corr_hits_raw, aes(x=coef, y=-log10(pval), 
+                              col=diffexpressed, 
+                              label=delabel)) + 
+  ggtitle("Serum Proteomics: Fever Hi vs Lo") +
+  scale_colour_manual(values = mycolours) + 
+  geom_point(size=0.3) + 
+  theme_bw() +
+  geom_text_repel(size=2,  max.overlaps = 30, segment.size=0.2, show.legend = FALSE) +
+    guides(colour = guide_legend(override.aes = list(size=5)))
+p
+#dev.off()
+
+#also, legend only: for the plots where only the q<0.05 are shown (not q<0.1)
+vdata2 <- fever_corr_hits_raw %>% filter(!(diffexpressed%in%c("UP q<0.1", "DOWN q<0.1")))
+
+#pdf(width=6, height=5, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/Volcano_LEGENDONLY_05.pdf")
+p = ggplot(vdata2, aes(x=coef, y=-log10(pval), 
+                              col=diffexpressed, 
+                              label=delabel)) + 
+  ggtitle("Serum Proteomics: Fever Hi vs Lo") +
+  scale_colour_manual(values = mycolours) + 
+  geom_point(size=0.3) + 
+  theme_bw() +
+  geom_text_repel(size=2,  max.overlaps = 30, segment.size=0.2, show.legend = FALSE) +
+    guides(colour = guide_legend(override.aes = list(size=5)))
+p
+#dev.off()
+
+
+
+#list all significant hits to check annotations / labels
+h3 <- fever_corr_hits_raw %>% filter(qval<0.1) %>% dplyr::select(Target, TargetFullName, EntrezGeneSymbol, pval, qval, coef, diffexpressed)
+h3
+
+#are there hits that are different when diet is accounted for
+setdiff(h2$Target, h3$Target) #IL10 is among those that lose significance, but ApoE etc not
+
+
+h3$Covariates <- c("SexAgeDiet")
+h3
+
+identical(names(h1), names(h2))
+identical(names(h2), names(h3))
+
+soma_hits_to_export <- Reduce(rbind, list(h1, h2, h3))
+#write.csv(soma_hits_to_export, "/ebio/abt3_projects2/uHEAT/data/SupplementalTables/S#_somalogic_stats.csv")
+
+```
+
+```{r soma plots2 volcano sex age diet igg1}
+#instead of a tile plot, do a volcano plot for the soma hits
+fever_corr_hits_raw <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_FINAL/maaslin2_output/Soma_maaslin2_b1_sex_age_igg1_diet3_fever.csv", row.names=1)
+fever_corr_hits_raw <- fever_corr_hits_raw %>% filter(metadata=="fever7d_aboveavg")
+
+mycolours <- c("deepskyblue4", "deepskyblue3", "firebrick4", "firebrick2", "grey")
+names(mycolours) <- c("DOWN q<0.05", "DOWN q<0.1", "UP q<0.05", "UP q<0.1",  "NO")
+fever_corr_hits_raw$diffexpressed <- c("NO")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef > 0 & fever_corr_hits_raw$qval<0.1] <- c("UP q<0.1")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef > 0 & fever_corr_hits_raw$qval<0.05] <- c("UP q<0.05")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef < 0 & fever_corr_hits_raw$qval<0.1] <- c("DOWN q<0.1")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef < 0 & fever_corr_hits_raw$qval<0.05] <- c("DOWN q<0.05")
+
+# Create a new column "delabel" to de, that will contain the name of genes differentially expressed 
+fever_corr_hits_raw$delabel <- ifelse(fever_corr_hits_raw$diffexpressed!="NO",
+                          yes=fever_corr_hits_raw$Target, no=NA)
+
+#pdf(width=6, height=5, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/2D.Soma_SexAgeIgG1Diet3Fever_Volcano.pdf")
+p = ggplot(data=fever_corr_hits_raw, aes(x=coef, y=-log10(pval), 
+                              col=diffexpressed, 
+                              label=delabel)) + 
+  ggtitle("Serum Proteomics: Fever Hi vs Lo") +
+  scale_colour_manual(values = mycolours) + 
+  geom_point(size=0.3) + 
+  theme_bw() +
+  geom_text_repel(size=2,  max.overlaps = 30, segment.size=0.2, show.legend = FALSE) 
+p
+#dev.off()
+
+#export a version specifically for the legend only for all volcano plots (larger points)
+#pdf(width=6, height=5, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/2C.SomaFeverVolcano_LEGEND.pdf")
+p = ggplot(data=fever_corr_hits_raw, aes(x=coef, y=-log10(pval), 
+                              col=diffexpressed, 
+                              label=delabel)) + 
+  ggtitle("Serum Proteomics: Fever Hi vs Lo") +
+  scale_colour_manual(values = mycolours) + 
+  geom_point(size=0.3) + 
+  theme_bw() +
+  geom_text_repel(size=2,  max.overlaps = 30, segment.size=0.2, show.legend = FALSE) +
+    guides(colour = guide_legend(override.aes = list(size=5)))
+p
+#dev.off()
+
+#also, legend only: for the plots where only the q<0.05 are shown (not q<0.1)
+vdata2 <- fever_corr_hits_raw %>% filter(!(diffexpressed%in%c("UP q<0.1", "DOWN q<0.1")))
+
+#pdf(width=6, height=5, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/Volcano_LEGENDONLY_05.pdf")
+p = ggplot(vdata2, aes(x=coef, y=-log10(pval), 
+                              col=diffexpressed, 
+                              label=delabel)) + 
+  ggtitle("Serum Proteomics: Fever Hi vs Lo") +
+  scale_colour_manual(values = mycolours) + 
+  geom_point(size=0.3) + 
+  theme_bw() +
+  geom_text_repel(size=2,  max.overlaps = 30, segment.size=0.2, show.legend = FALSE) +
+    guides(colour = guide_legend(override.aes = list(size=5)))
+p
+#dev.off()
+
+```
+
+```{r soma maaslin2 diet}
+
+#age / sex / diet 
+model_diet_corr = Maaslin2(
+  input_data = soma_data_norm_baseline_t, 
+  input_metadata = soma_meta_baseline, 
+  output = "maaslin2_output", 
+  fixed_effects = c("Sex", "Age", "Diet3"), 
+  #random_effects = c("Participant_ID"), #only Baseline
+  reference=c("Sex", "m"), #male as ref for Sex
+  normalization="none", #do not further normalize the data
+  transform="log", #but log transform
+  #min_abundance=0.0001, #no reasonable min abund exists
+  min_prevalence=0.25, #must be present in 25% of samples #but there are no zeroes in this data
+  max_significance=0.05, 
+  plot_scatter=FALSE
+)
+diet_corr2 <- model_diet_corr$results
+diet_corr2 %>% filter(qval<0.05&metadata=="Diet3") #
+
+#export
+diet_corr2 <- diet_corr2 %>% 
+  rename(SomaSeqId=feature) %>%
+  full_join(soma_map) %>%
+  filter(!is.na(qval))
+write.csv(diet_corr2, "/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/Soma_maaslin2_b1_sex_age_diet3.csv")
+
+```
+
+```{r soma plots2 volcano diet}
+#instead of a tile plot, do a volcano plot for the soma hits
+fever_corr_hits_raw <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/Soma_maaslin2_b1_sex_age_diet3.csv", row.names=1)
+fever_corr_hits_raw <- fever_corr_hits_raw %>% filter(metadata=="Diet3")
+#this model was run omni vs veg instead of veg vs omni as in the other one : flip the coefficents #check!
+fever_corr_hits_raw$coef <- fever_corr_hits_raw$coef*-1
+
+mycolours <- c("coral3", "pink", "seagreen4", "seagreen2", "grey")
+names(mycolours) <- c("DOWN q<0.05", "DOWN q<0.1", "UP q<0.05", "UP q<0.1",  "NO")
+fever_corr_hits_raw$diffexpressed <- c("NO")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef > 0 & fever_corr_hits_raw$qval<0.1] <- c("UP q<0.1")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef > 0 & fever_corr_hits_raw$qval<0.05] <- c("UP q<0.05")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef < 0 & fever_corr_hits_raw$qval<0.1] <- c("DOWN q<0.1")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef < 0 & fever_corr_hits_raw$qval<0.05] <- c("DOWN q<0.05")
+
+# Create a new column "delabel" to de, that will contain the name of genes differentially expressed 
+fever_corr_hits_raw$delabel <- ifelse(fever_corr_hits_raw$diffexpressed!="NO",
+                          yes=fever_corr_hits_raw$Target, no=NA)
+
+#pdf(width=6, height=5, "/ebio/abt3_projects2/uHEAT/data/plots5/S#_SomaDietVolcano.pdf")
+p = ggplot(data=fever_corr_hits_raw, aes(x=coef, y=-log10(pval), 
+                              col=diffexpressed, 
+                              label=delabel)) + 
+  ggtitle("Serum Proteomics: Diet Veg vs Omni") +
+  scale_colour_manual(values = mycolours) + 
+  geom_point(size=0.3) + 
+  theme_bw() +
+  geom_text_repel(size=2,  max.overlaps = 30, segment.size=0.2, show.legend = FALSE)
+p
+#dev.off()
+
+#export a version specifically for the legend only for all volcano plots (larger points)
+#pdf(width=6, height=5, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2B.SomaDietVolcano_LEGEND.pdf")
+p = ggplot(data=fever_corr_hits_raw, aes(x=coef, y=-log10(pval), 
+                              col=diffexpressed, 
+                              label=delabel)) + 
+  ggtitle("Serum Proteomics: Diet Veg vs Omni") +
+  scale_colour_manual(values = mycolours) + 
+  geom_point(size=0.3) + 
+  theme_bw() +
+  geom_text_repel(size=2,  max.overlaps = 30, segment.size=0.2, show.legend = FALSE) +
+    guides(colour = guide_legend(override.aes = list(size=5)))
+p
+#dev.off()
+
+#also, legend only: for the plots where only the q<0.05 are shown (not q<0.1)
+vdata2 <- fever_corr_hits_raw %>% filter(!(diffexpressed%in%c("UP q<0.1", "DOWN q<0.1")))
+
+#pdf(width=6, height=5, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/Volcano_LEGENDONLY_05.pdf")
+p = ggplot(vdata2, aes(x=coef, y=-log10(pval), 
+                              col=diffexpressed, 
+                              label=delabel)) + 
+  ggtitle("Serum Proteomics: Fever Hi vs Lo") +
+  scale_colour_manual(values = mycolours) + 
+  geom_point(size=0.3) + 
+  theme_bw() +
+  geom_text_repel(size=2,  max.overlaps = 30, segment.size=0.2, show.legend = FALSE) +
+    guides(colour = guide_legend(override.aes = list(size=5)))
+p
+#dev.off()
+
+soma_hits_to_export <- fever_corr_hits_raw %>% filter(qval<0.1) %>% dplyr::select(Target, TargetFullName, EntrezGeneSymbol, pval, qval, coef, diffexpressed)
+#write.csv(soma_hits_to_export, "/ebio/abt3_projects2/uHEAT/data/SupplementalTables/S#_somalogic_stats_SexAgeDIET3.csv")
+
+```
+
+```{r soma maaslin2 IgGb2}
+#directly like for fever
+identical(row.names(soma_meta_baseline), names(soma_data_norm_baseline_t))
+soma_meta_baseline$IgG_B2_aboveavg <- factor(soma_meta_baseline$IgG_B2_aboveavg, levels=c("lo", "hi"))
+#age / sex / diet 
+model_igg_corr = Maaslin2(
+  input_data = soma_data_norm_baseline_t, 
+  input_metadata = soma_meta_baseline, 
+  output = "maaslin2_output", 
+  fixed_effects = c("Sex", "Age", "IgG_B2_aboveavg"), 
+  #random_effects = c("Participant_ID"), #only Baseline
+  reference=c("Sex", "m"), #male as ref for Sex
+  normalization="none", #do not further normalize the data
+  transform="log", #but log transform
+  #min_abundance=0.0001, #no reasonable min abund exists
+  min_prevalence=0.25, #must be present in 25% of samples #but there are no zeroes in this data
+  max_significance=0.05, 
+  plot_scatter=FALSE
+)
+igg_corr2 <- model_igg_corr$results
+igg_corr2 %>% filter(qval<0.05&metadata=="IgG_B2_aboveavg") #
+
+#export
+igg_corr2 <- igg_corr2 %>% 
+  rename(SomaSeqId=feature) %>%
+  full_join(soma_map) %>%
+  filter(!is.na(qval))
+#write.csv(igg_corr2, "/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/Soma_maaslin2_b1_sex_age_IgGB2.csv")
+
+#directly but controlling for starting antibody levels
+#age / sex / diet / igg1
+model_igg_corr = Maaslin2(
+  input_data = soma_data_norm_baseline_t, 
+  input_metadata = soma_meta_baseline, 
+  output = "maaslin2_output", 
+  fixed_effects = c("Sex", "Age", "IgG_B1", "IgG_B2_aboveavg"), 
+  #random_effects = c("Participant_ID"), #only Baseline
+  reference=c("Sex", "m"), #male as ref for Sex
+  normalization="none", #do not further normalize the data
+  transform="log", #but log transform
+  #min_abundance=0.0001, #no reasonable min abund exists
+  min_prevalence=0.25, #must be present in 25% of samples #but there are no zeroes in this data
+  max_significance=0.05, 
+  plot_scatter=FALSE
+)
+igg_corr2 <- model_igg_corr$results
+igg_corr2 %>% filter(qval<0.05&metadata=="IgG_B2_aboveavg") #
+
+#export
+igg_corr2 <- igg_corr2 %>% 
+  rename(SomaSeqId=feature) %>%
+  full_join(soma_map) %>%
+  filter(metadata=="IgG_B2_aboveavg") #don't filter by qval, then I can't do a volcano
+#write.csv(igg_corr2, "/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/Soma_maaslin2_b1_sex_age_IgGB1_IgGB2_all.csv")
+
+#to be slightly fairer, only take dose 3 BioNTech, no prior infections
+#dose 3 only:
+soma_meta_baseline3 <- soma_meta_baseline %>% filter(Vaccine_StudyDose==3&StudyVaccine_Type=="BioNTech"&previous_COVID19_infection!="y")
+soma_data_norm_baseline3 <- soma_data_norm[row.names(soma_data_norm)%in%soma_meta_baseline3$Soma_SampleID,]
+soma_data_norm_baseline3_t <- as.data.frame(t(soma_data_norm_baseline3))
+identical(soma_meta_baseline3$Soma_SampleID, names(soma_data_norm_baseline3_t))
+
+dim(soma_meta_baseline3)
+
+#age / sex / diet / vaccine type
+model_igg_corr = Maaslin2(
+  input_data = soma_data_norm_baseline3_t, 
+  input_metadata = soma_meta_baseline3, 
+  output = "maaslin2_output", 
+  fixed_effects = c("Sex", "Age", "IgG_B2_aboveavg"), 
+  #random_effects = c("Participant_ID"), #only Baseline
+  reference=c("Sex", "m"), #male as ref for Sex
+  normalization="none", #do not further normalize the data
+  transform="log", #but log transform
+  #min_abundance=0.0001, #no reasonable min abund exists
+  min_prevalence=0.25, #must be present in 25% of samples #but there are no zeroes in this data
+  max_significance=0.05, 
+  plot_scatter=FALSE
+)
+igg_corr2 <- model_igg_corr$results
+igg_corr2 %>% filter(qval<0.05&metadata=="IgG_B2_aboveavg") #
+
+#export
+igg_corr2 <- igg_corr2 %>% 
+  rename(SomaSeqId=feature) %>%
+  full_join(soma_map) %>%
+  filter(qval<0.1&metadata=="IgG_B2_aboveavg")
+
+#write.csv(igg_corr2, "/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/Soma_maaslin2_b1dose3BNT_sex_age_IgGB2.csv")
+
+```
+
+```{r soma plots2 volcano sex age IgG1 IgG2}
+#first plot: whole dataset hits
+#instead of a tile plot, do a volcano plot for the soma hits
+fever_corr_hits_raw <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/Soma_maaslin2_b1_sex_age_IgGB1_IgGB2_all.csv", row.names=1)
+fever_corr_hits_raw <- fever_corr_hits_raw %>% filter(metadata=="IgG_B2_aboveavg")
+
+mycolours <- c("skyblue3", "skyblue1", "orchid4", "orchid3", "grey")
+names(mycolours) <- c("DOWN q<0.05", "DOWN q<0.1", "UP q<0.05", "UP q<0.1",  "NO")
+fever_corr_hits_raw$diffexpressed <- c("NO")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef > 0 & fever_corr_hits_raw$qval<0.1] <- c("UP q<0.1")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef > 0 & fever_corr_hits_raw$qval<0.05] <- c("UP q<0.05")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef < 0 & fever_corr_hits_raw$qval<0.1] <- c("DOWN q<0.1")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef < 0 & fever_corr_hits_raw$qval<0.05] <- c("DOWN q<0.05")
+
+# Create a new column "delabel" to de, that will contain the name of genes differentially expressed 
+fever_corr_hits_raw$delabel <- ifelse(fever_corr_hits_raw$diffexpressed!="NO",
+                          yes=fever_corr_hits_raw$Target, no=NA)
+
+#pdf(width=6, height=5, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S3B_SomaIgGVolcano.pdf")
+p = ggplot(data=fever_corr_hits_raw, aes(x=coef, y=-log10(pval), 
+                              col=diffexpressed, 
+                              label=delabel)) + 
+  ggtitle("Serum Proteomics: IgG hi vs lo") +
+  scale_colour_manual(values = mycolours) + 
+  geom_point(size=0.3) + 
+  theme_bw() +
+  geom_text_repel(size=2,  max.overlaps = 30, segment.size=0.2, show.legend = FALSE)
+p
+#dev.off()
+
+#second plot: dose 3 / bnt only
+#instead of a tile plot, do a volcano plot for the soma hits
+fever_corr_hits_raw <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/Soma_maaslin2_b1dose3BNT_sex_age_IgGB2.csv", row.names=1)
+fever_corr_hits_raw <- fever_corr_hits_raw %>% filter(metadata=="IgG_B2_aboveavg")
+#this model was run omni vs veg instead of veg vs omni as in the other one : flip the coefficents #check!
+fever_corr_hits_raw$coef <- fever_corr_hits_raw$coef*-1
+
+mycolours <- c("skyblue4", "skyblue2", "orchid4", "orchid3", "grey")
+names(mycolours) <- c("DOWN q<0.05", "DOWN q<0.1", "UP q<0.05", "UP q<0.1",  "NO")
+fever_corr_hits_raw$diffexpressed <- c("NO")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef > 0 & fever_corr_hits_raw$qval<0.1] <- c("UP q<0.1")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef > 0 & fever_corr_hits_raw$qval<0.05] <- c("UP q<0.05")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef < 0 & fever_corr_hits_raw$qval<0.1] <- c("DOWN q<0.1")
+fever_corr_hits_raw$diffexpressed[fever_corr_hits_raw$coef < 0 & fever_corr_hits_raw$qval<0.05] <- c("DOWN q<0.05")
+
+# Create a new column "delabel" to de, that will contain the name of genes differentially expressed 
+fever_corr_hits_raw$delabel <- ifelse(fever_corr_hits_raw$diffexpressed!="NO",
+                          yes=fever_corr_hits_raw$Target, no=NA)
+
+#pdf(width=6, height=5, "/ebio/abt3_projects2/uHEAT/data/plots5/S#_SomaIgGVolcano.pdf")
+p = ggplot(data=fever_corr_hits_raw, aes(x=coef, y=-log10(qval), 
+                              col=diffexpressed, 
+                              label=delabel)) + 
+  ggtitle("Serum Proteomics: IgG hi vs lo") +
+  scale_colour_manual(values = mycolours) + 
+  geom_point(size=0.3) + 
+  theme_bw() +
+  geom_text_repel(size=2,  max.overlaps = 30, segment.size=0.2, show.legend = FALSE) +
+  geom_hline(yintercept=-log10(0.05), linetype="dashed") +
+  geom_hline(yintercept=-log10(0.1), linetype="dashed")
+p
+#dev.off()
+
+#inspect top hits
+fever_corr_hits_raw %>% filter(qval<0.1)
+
+```
+
+```{r medi vs soma spearmans}
+#spearmans, untargeted. #updated to use the no-Hibiscus version
+#add the appropriate id's to the medi table
+medi <- read.csv("/ebio/abt3_projects2/uHEAT/data/Medi/Medi_reads_per_sample_noHibiscus_2026.csv", row.names=1)
+medi <- soma_meta_baseline %>% dplyr::select(Participant_ID, Soma_SampleID) %>%
+  full_join(medi) %>%
+  filter(!is.na(Soma_SampleID))
+identical(names(soma_data_norm_baseline_t), medi$Soma_SampleID)
+#how many did I test
+length(soma_map$Target)
+
+#multiple spearman's : all blood proteins vs the relative abundance of plant/fungal DNA in stool
+SP.p = apply(soma_data_norm_baseline_t,1,
+             function(x) cor.test(c(x), medi$relabund_StreptophytaBasidiomycota, method='spearman')$p.value)
+SP.rho = apply(soma_data_norm_baseline_t,1,
+                function(x) cor.test(c(x), medi$relabund_StreptophytaBasidiomycota, method='spearman')$estimate)
+pres <- data.frame(SomaSeqId=names(SP.p), pval=SP.p, rho=SP.rho)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+pres[order(pres$qval),] #a few are quite significant
+
+untargeted_results_s <- pres %>% full_join(soma_map)
+untargeted_results_s <- untargeted_results_s[order(untargeted_results_s$pval),]
+head(untargeted_results_s) #but they are not necessarily the same fever hits
+untargeted_results_s %>% filter(qval<0.05) %>% View()
+untargeted_results_s$Medi <- c("relabund_StreptophytaBasidiomycota")
+
+#multiple spearman's : all blood proteins vs the relative abundance of food DNA in stool
+SP.p = apply(soma_data_norm_baseline_t,1,
+             function(x) cor.test(c(x), medi$Total_Food_relabund, method='spearman')$p.value)
+SP.rho = apply(soma_data_norm_baseline_t,1,
+                function(x) cor.test(c(x), medi$Total_Food_relabund, method='spearman')$estimate)
+pres2 <- data.frame(SomaSeqId=names(SP.p), pval=SP.p, rho=SP.rho)
+pres2$qval <- p.adjust(pres2$pval, method='fdr')
+pres2[order(pres2$qval),] 
+
+untargeted_results_s2 <- pres2 %>% full_join(soma_map)
+untargeted_results_s2 <- untargeted_results_s2[order(untargeted_results_s2$pval),]
+head(untargeted_results_s2) #but they are not necessarily the same fever hits
+#untargeted_results_s2 %>% filter(qval<0.05) %>% View() #many fewer hits
+untargeted_results_s2$Medi <- c("Total_Food_relabund")
+
+#Log Food Reads (not rel abund; Fig 5B)
+SP.p = apply(soma_data_norm_baseline_t,1,
+             function(x) cor.test(c(x), log(medi$Total_Food_Reads), method='spearman')$p.value)
+SP.rho = apply(soma_data_norm_baseline_t,1,
+                function(x) cor.test(c(x), log(medi$Total_Food_Reads), method='spearman')$estimate)
+pres3 <- data.frame(SomaSeqId=names(SP.p), pval=SP.p, rho=SP.rho)
+pres3$qval <- p.adjust(pres3$pval, method='fdr')
+pres3[order(pres3$qval),] 
+
+untargeted_results_s3 <- pres3 %>% full_join(soma_map)
+untargeted_results_s3 <- untargeted_results_s3[order(untargeted_results_s3$pval),]
+head(untargeted_results_s3) 
+#untargeted_results_s3 %>% filter(qval<0.05) %>% View() 
+untargeted_results_s3$Medi <- c("Total_Food_Reads")
+
+#% Plant Foods (as per Fig 5A) #updated no hibiscus
+plants_ratio <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/MEDI_plantsratio_nohibiscus.csv", row.names = 1)
+#medi_foods <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/MEDI_foods_per_person.csv", row.names=1)
+#medi_foods$Participant_ID <- row.names(medi_foods)
+#medi_foods <- medi_foods %>% full_join(plants_ratio) 
+plants_ratio <- soma_meta_baseline %>% dplyr::select(Participant_ID, Soma_SampleID) %>%
+  full_join(plants_ratio) %>%
+  filter(!is.na(Soma_SampleID))
+identical(names(soma_data_norm_baseline_t), plants_ratio$Soma_SampleID)
+
+SP.p = apply(soma_data_norm_baseline_t,1,
+             function(x) cor.test(c(x), log(plants_ratio$ratio_plants), method='spearman')$p.value)
+SP.rho = apply(soma_data_norm_baseline_t,1,
+                function(x) cor.test(c(x), log(plants_ratio$ratio_plants), method='spearman')$estimate)
+pres4 <- data.frame(SomaSeqId=names(SP.p), pval=SP.p, rho=SP.rho)
+pres4$qval <- p.adjust(pres4$pval, method='fdr')
+pres4[order(pres4$qval),] 
+
+untargeted_results_s4 <- pres4 %>% full_join(soma_map)
+untargeted_results_s4 <- untargeted_results_s4[order(untargeted_results_s4$pval),]
+head(untargeted_results_s4) 
+#untargeted_results_s4 %>% filter(qval<0.05) %>% View() 
+untargeted_results_s4$Medi <- c("Percent_Plants")
+
+#combine and correct all data, export
+soma_medi_corr <- Reduce(full_join, list(untargeted_results_s,
+                                         untargeted_results_s2,
+                                         untargeted_results_s3,
+                                         untargeted_results_s4))
+soma_medi_corr$qval2 <- p.adjust(soma_medi_corr$pval, method='fdr') #more stringent correction of all
+#keep only the genes that have a good qval for a least one thing
+gene_hits <- soma_medi_corr %>% filter(qval<0.05)
+soma_medi_corr <- soma_medi_corr %>% filter(SomaSeqId %in% gene_hits$SomaSeqId)
+#Flag the gene if it also comes up in the original fever analysis OR in the diet analysis
+fever_hits <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/Soma_maaslin2_b1_sex_age_fever.csv", row.names=1)
+fever_hits <- fever_hits %>% filter(metadata=="fever7d_aboveavg"&qval<0.1)
+fever_hits$value #hi
+diet_hits <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_output/Soma_maaslin2_b1_sex_age_diet3.csv", row.names=1)
+diet_hits <- diet_hits %>% filter(metadata=="Diet3"&qval<0.1)
+diet_hits$value #Omni
+soma_medi_corr$shared_hit <- case_when(soma_medi_corr$SomaSeqId %in% fever_hits$SomaSeqId ~ "fever7d_aboveavg",
+                                       soma_medi_corr$SomaSeqId %in% diet_hits$SomaSeqId ~ "Diet3",
+                                       soma_medi_corr$SomaSeqId %in% diet_hits$SomaSeqId & soma_medi_corr$SomaSeqId %in% fever_hits$SomaSeqId ~ "FeverDiet")
+
+#write.csv(soma_medi_corr, "/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_FINAL/maaslin2_output/Soma_vs_MEDI_Spearmans_noHibiscus.csv")
+
+```
+
+```{r plot medi vs soma (revised)}
+#import correlations & data
+soma_medi_corr <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_FINAL/maaslin2_output/Soma_vs_MEDI_Spearmans_noHibiscus.csv")
+medi <- read.csv("/ebio/abt3_projects2/uHEAT/data/Medi/Medi_reads_per_sample_noHibiscus_2026.csv", row.names=1)
+#take only the total food reads to be more consistent with Fig 5
+soma_medi_foodreads <- soma_medi_corr %>% filter(Medi=="Total_Food_Reads"&qval<0.05)
+#first: plot individually the interesting hits that overlap with diet and fever
+shared_hits <- soma_medi_foodreads %>% filter(!is.na(soma_medi_foodreads$shared_hit)&qval<0.05)
+shared_hits
+shared_hits_fever <- shared_hits %>% filter(shared_hit=="fever7d_aboveavg")
+shared_hits_diet <- shared_hits %>% filter(shared_hit=="Diet3")
+#also plot: 2 of the top hits generally are appetite hormones which is fun
+head(soma_medi_foodreads[order(soma_medi_foodreads$qval, decreasing=FALSE),], 10)
+
+pdata <- data.frame(CLC1A=soma_data_norm_baseline$seq.21853.3,
+                    sRANKL=soma_data_norm_baseline$seq.2917.3,
+                    B3GN2=soma_data_norm_baseline$seq.7980.72,
+                    PYY=soma_data_norm_baseline$seq.3727.35,
+                    SCT=soma_data_norm_baseline$seq.3728.52,
+                    Soma_SampleID=row.names(soma_data_norm_baseline)) %>%
+  full_join(soma_meta_baseline) %>%
+  full_join(medi) %>%
+  filter(!is.na(fever7d_aboveavg))
+pdata$fever7d_aboveavg <- factor(pdata$fever7d_aboveavg, levels=c("lo", "hi"))
+
+cor.test(pdata$CLC1A, pdata$Total_Food_Reads, method='spearman') #just to double check ; but I should plot the qval
+shared_hits_fever 
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/FoodReads_vs_CLEC1.pdf")
+p1 <- ggplot(pdata, aes(x=log(Total_Food_Reads), y=log(CLC1A))) + geom_point() + geom_smooth(method='lm') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab("Log Food Reads") + ylab("Serum CLEC-1 (Log RFU)") + 
+  annotate('text', x=5, y=8.50, label="q=0.008\nrho=-0.31", hjust=0)
+p1
+#dev.off()
+
+cor.test(pdata$sRANKL, pdata$Total_Food_Reads, method='spearman') #just to double check ; but I should plot the qval
+shared_hits_fever 
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/FoodReads_vs_sRANKL.pdf")
+p1 <- ggplot(pdata, aes(x=log(Total_Food_Reads), y=log(sRANKL))) + geom_point() + geom_smooth(method='lm') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab("Log Food Reads") + ylab("Serum RANKL (Log RFU)") + 
+  annotate('text', x=5, y=7.65, label="q=0.039\nrho=-0.26", hjust=0)
+p1
+#dev.off()
+
+cor.test(pdata$B3GN2, pdata$Total_Food_Reads, method='spearman') #just to double check ; but I should plot the qval
+shared_hits_fever #it is no longer a major shared hit
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/FoodReads_vs_B3GN2.pdf")
+p1 <- ggplot(pdata, aes(x=log(Total_Food_Reads), y=log(B3GN2))) + geom_point() + geom_smooth(method='lm') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab("Log Food Reads") + ylab("Serum B3GNT2 (Log RFU)") + 
+  annotate('text', x=4.8, y=8.2, label="q=0.03\nrho=0.24", hjust=0)
+p1
+#dev.off()
+
+cor.test(pdata$PYY, pdata$Total_Food_Reads, method='spearman') #just to double check ; but I should plot the qval
+head(soma_medi_foodreads[order(soma_medi_foodreads$qval, decreasing=FALSE),], 10)
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/FoodReads_vs_PYY.pdf")
+p1 <- ggplot(pdata, aes(x=log(Total_Food_Reads), y=log(PYY))) + geom_point() + geom_smooth(method='lm') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab("Log Food Reads") + ylab("Serum PYY (Log RFU)") + 
+  annotate('text', x=4.8, y=8.2, label="q=0.009\nrho=0.31", hjust=0)
+p1
+#dev.off()
+
+cor.test(pdata$SCT, pdata$Total_Food_Reads, method='spearman') #just to double check ; but I should plot the qval
+head(soma_medi_foodreads[order(soma_medi_foodreads$qval, decreasing=FALSE),], 10) #it's no longer top 10, without hibiscus
+head(soma_medi_foodreads[order(soma_medi_foodreads$qval, decreasing=FALSE),], 20) #number 15
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/FoodReads_vs_SCT.pdf")
+p1 <- ggplot(pdata, aes(x=log(Total_Food_Reads), y=log(SCT))) + geom_point() + geom_smooth(method='lm') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab("Log Food Reads") + ylab("Serum Secretin (Log RFU)") + 
+  annotate('text', x=4.8, y=6.1, label="q=0.008\nrho=0.31", hjust=0)
+p1
+#dev.off()
+
+#interesting shared diet hits to plot? 
+shared_hits_diet #there are four, but I don't know how interesting.
+
+#a small heatmap of all hits at q<0.05, for supplemental?
+hits_to_plot <- soma_medi_corr %>% filter(qval<0.05 & Medi=="Total_Food_Reads" & abs(rho)>0.2)
+dim(hits_to_plot) #n=65 hits, seems reasonable. #even with abs rho
+hits_to_plot$TargetFullName <- factor(hits_to_plot$TargetFullName,
+                                      levels=hits_to_plot[order(hits_to_plot$rho, decreasing=TRUE),]$TargetFullName)
+
+hits_to_plot$EntrezGeneSymbol <- factor(hits_to_plot$EntrezGeneSymbol,
+                                      levels=hits_to_plot[order(hits_to_plot$rho, decreasing=TRUE),]$EntrezGeneSymbol)
+
+#actually what I really want is just a simple little bubble map.
+pdf(height=10, width=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/Soma_vs_Medi_BubblePlot2.pdf")
+p <- ggplot(hits_to_plot, aes(x=Medi, y=EntrezGeneSymbol)) + 
+  geom_point(aes(size=1/qval, col=rho)) +
+  scale_colour_gradient2(low="deepskyblue4", mid="white", high="firebrick4") +
+  theme_minimal() + xlab(NULL) + ylab(NULL)
+p
+dev.off()
+
+```

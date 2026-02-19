@@ -1,0 +1,670 @@
+---
+title: "SPF_diet_taxa"
+author: "Kelsey Huus"
+date: "2024-12-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+##Packages
+library(tidyr)
+library(data.table)
+library(tidytable)
+library(dplyr)
+library(Maaslin2)
+library(ggplot2)
+```
+
+
+```{r metadata}
+#mouse metadata
+mouse_meta <- read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/SPF_Diet/spf_diet_metadata.csv")
+mouse_meta
+#make a seq id compatible
+mouse_meta$seq_id <- paste("KH", mouse_meta$mouse.ID, sep="_") #make it compatible with bracken
+
+#add other metadata (cytokines, antibodies, etc.)
+spf <- read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/SPF_Diet/SPF_cytokines_summary_R.csv")
+spf <- spf %>% filter(Sample!="")
+spf <- spf[,c(1:12)] #get rid of weird empty columns frome excel
+spf$seq_id <- paste("KH", row.names(spf), sep="_") #they are just in order
+
+mouse_meta <- mouse_meta %>% full_join(spf)
+
+```
+
+```{r add correct sequencing depth}
+##Read Files - QC
+seqstats <- read.table("/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/reports/final/seqkit_stats.tsv", header=TRUE) 
+seqstats
+
+seqstats$seq_id <- paste("KH_", seqstats$Sample, sep="")
+
+mouse_meta <- seqstats %>% dplyr::filter(Read==1) %>% dplyr::select(seq_id, num_seqs) %>%
+  rename(seq_depth_mouse=num_seqs) %>%
+  full_join(mouse_meta)
+
+```
+
+
+```{r read_braken}
+#' Function for reading in a bracken taxonomy table
+#'
+#' The table will be converted to long form (sample ~ abundance).
+#' Only "_frac" or "_num" columns will be kept (see "keep_frac").
+#' Taxonomy will be split into separate levels (see "tax_levs").
+#' tidytable (w/ data.table) used to speed the process up.
+#'
+#' @param infile Path to bracken table file
+#' @param nrows Number of table rows to read. If Inf, all lines will be read.
+#' @param keep_frac If TRUE, keep all columns ending in "_frac"; otherwise, keep "_num" columns.
+#' @param tax_levs Taxonomic levels to separate the taxonomy column into.
+#' @param ... Params passed to fread()
+#' @return data.table
+#' @export
+#' @import tidytable
+#' @importFrom data.table fread
+#' 
+read_bracken = function(infile, nrows=Inf, keep_frac=TRUE,
+                        tax_levs = c('Domain', 'Phylum', 'Class', 'Order',
+                                     'Family', 'Genus', 'Species'),
+                        nThread = 4, ...){
+  if(keep_frac){
+    to_rm = '_num'
+    to_keep = '_frac'
+  } else {
+    to_rm = '_frac'
+    to_keep = '_num'
+  }
+  dt = data.table::fread(infile, sep='\t', nrows=nrows, check.names=TRUE,
+                         nThread=nThread, ...) %>%
+    tidytable::select(-taxIDs, -ends_with(!!to_rm)) %>%
+    tidytable::mutate(taxonomy = gsub(';[pcofgs]__', ';', taxonomy),
+                       taxonomy = gsub('^d__', '', taxonomy)) %>%
+    tidytable::separate(taxonomy, tax_levs, sep=';') %>%
+    tidytable::pivot_longer(cols=ends_with(!!to_keep),
+                               names_to='Sample',
+                               values_to='Abundance') %>%
+    tidytable::mutate(Sample = gsub('(_frac|_num)$', '', Sample))
+
+  return(dt)
+}
+
+```
+
+```{r import brk}
+#read in the brk_cls file
+##Read Files - rel abund
+#output of llmgp #update: instead, for re-analysis, read in the ids only or the filtered table only
+profile_dir <- "/ebio/abt3_projects2/uHEAT/data/Mouse/SPF_Diet/final/llmgp/kraken" #this is a dumb spot for it, it overwrote QC; was an accident
+
+# reading tables
+brk_cls = "/ebio/abt3_projects2/uHEAT/data/Mouse/SPF_Diet/final/llmgp/kraken/all-combined-bracken.tsv" %>%
+  plyr::llply(read_bracken) %>%
+  data.table::rbindlist(use.names=TRUE, idcol='dataset')
+brk_cls
+names(brk_cls)
+
+#keep a tax table
+tax <- brk_cls %>% dplyr::select(Domain, Phylum, Class, Order, Family, Genus, Species, taxonomy_id) %>%
+  filter(!duplicated(taxonomy_id))
+#write.csv(tax, "/ebio/abt3_projects2/uHEAT/data/Mouse/SPF_Diet/llmgp/tax_table.csv")
+
+```
+
+```{r barplots species}
+#move all but the 10 most abundant taxa into an 'others' category
+#but these are like WAY over-categorized to species level!
+taxa_to_keep <- brk_cls %>% group_by(Species) %>% 
+  summarize(abund=sum(Abundance)) %>%
+  filter(abund>0) 
+taxa_to_keep[order(taxa_to_keep$abund, decreasing=TRUE),]
+
+top_taxa <- (head(taxa_to_keep[order(taxa_to_keep$abund, decreasing=TRUE),], 25))$Species
+
+brk_cls$plot_taxa <- ifelse(brk_cls$Species %in% top_taxa,
+                               yes=brk_cls$Species,
+                               no="others")
+
+bar_plot <- brk_cls %>% 
+  group_by(Sample, plot_taxa) %>% 
+  summarize(Abundance=sum(Abundance))
+
+#make a barplot
+#define colours to use in plots #25 + others
+colours <- c("steelblue", "goldenrod1","forestgreen", "lightblue1", "lightpink", "red", 
+             "darkorchid3", "darkseagreen1", "khaki1",  "palevioletred", "darkturquoise", "honeydew4",
+             "gray95", "plum1", "blue",  "purple", "yellow", 
+             "green", "orange", "turquoise",
+             "chartreuse4", "thistle3", "firebrick3", "lightsteelblue2", "saddlebrown",
+             "black")
+
+#put the taxa in order so that "others" is last
+top_taxa_order <- c(top_taxa, "others")
+bar_plot$plot_taxa <- factor(bar_plot$plot_taxa,
+                               levels=top_taxa_order)
+
+#add metadata
+bar_plot <- bar_plot %>% rename(seq_id=Sample) %>%
+  full_join(mouse_meta)
+
+#basic bar plot
+bar_plot$diet <- factor(bar_plot$diet, levels=c("ctrl", "cmc", "wsd"))
+bar_plot$mouse.ID <- factor(bar_plot$mouse.ID, levels=c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+                                                                           "11", "12", "13", "14", "15", "16", "17", "18", "19", "20",
+                                                                           "21", "22", "23", "24"))
+
+#pdf(width=10, height=5, "/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/plots/barplots_all_species.pdf")
+p <- ggplot(bar_plot, aes(mouse.ID, Abundance, fill=plot_taxa)) + 
+  geom_bar(stat="identity", colour="black") +
+  facet_grid(. ~ diet, drop=FALSE,scale="free",space="free_x") + 
+  theme_bw() +
+  labs(x="Sample", y="Proportion") + 
+  scale_y_continuous(expand = c(0,0)) + theme(strip.background = element_rect(fill="gray85")) +
+  scale_fill_manual(values = colours) + theme(panel.spacing = unit(0.3, "lines")) + 
+  theme(axis.text.x=element_text(angle=90,hjust=0.5,vjust=0.5)) + 
+  guides(fill=guide_legend(title="Taxa"))
+p
+#dev.off()
+
+#huh, interesting. and the full taxonomy for those guys?
+tax[grep("MGBC162267", tax$Species),]
+
+```
+
+```{r barplots genus}
+
+#and, at genus level?
+barplot_genus <- brk_cls %>% group_by(Sample, Genus) %>% summarize(Abundance=sum(Abundance))
+taxa_to_keep <- barplot_genus %>% group_by(Genus) %>% 
+  summarize(abund=sum(Abundance)) %>%
+  filter(abund>0) 
+taxa_to_keep[order(taxa_to_keep$abund, decreasing=TRUE),]
+
+top_taxa <- (head(taxa_to_keep[order(taxa_to_keep$abund, decreasing=TRUE),], 25))$Genus #the other 2 are so minor
+
+barplot_genus$plot_taxa <- ifelse(barplot_genus$Genus %in% top_taxa,
+                                     yes=barplot_genus$Genus,
+                                     no="others")
+
+bar_plot <- barplot_genus %>% group_by(Sample, plot_taxa) %>% summarize(Abundance=sum(Abundance))
+
+#put the taxa in order so that "others" is last
+top_taxa_order <- c(top_taxa, "others")
+bar_plot$plot_taxa <- factor(bar_plot$plot_taxa,
+                               levels=top_taxa_order)
+
+#add metadata
+bar_plot <- bar_plot %>% rename(seq_id=Sample) %>%
+  full_join(mouse_meta)
+
+#basic bar plot
+bar_plot$diet <- factor(bar_plot$diet, levels=c("ctrl", "cmc", "wsd"))
+bar_plot$mouse.ID <- factor(bar_plot$mouse.ID, levels=c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+                                                                           "11", "12", "13", "14", "15", "16", "17", "18", "19", "20",
+                                                                           "21", "22", "23", "24"))
+
+#pdf(width=10, height=5, "/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/plots/barplots_all_species.pdf")
+p <- ggplot(bar_plot, aes(mouse.ID, Abundance, fill=plot_taxa)) + 
+  geom_bar(stat="identity", colour="black") +
+  facet_grid(. ~ diet, drop=FALSE,scale="free",space="free_x") + 
+  theme_bw() +
+  labs(x="Sample", y="Proportion") + 
+  scale_y_continuous(expand = c(0,0)) + theme(strip.background = element_rect(fill="gray85")) +
+  scale_fill_manual(values = colours) + theme(panel.spacing = unit(0.3, "lines")) + 
+  theme(axis.text.x=element_text(angle=90,hjust=0.5,vjust=0.5)) + 
+  guides(fill=guide_legend(title="Taxa"))
+p
+#dev.off()
+
+```
+
+```{r waltera}
+##are waltera relatives present at all??
+brk_cls %>% filter(Genus=="Acetatifactor") %>% as.data.frame() #it's at very low abundance.
+
+#plot summarized Acetatifactor abundance, genus level.
+waltera <- brk_cls %>% filter(Genus=="Acetatifactor")  %>%
+  group_by(Sample, Genus) %>% summarize(Abundance=sum(Abundance))
+
+#add metadata
+waltera <- waltera %>% rename(seq_id=Sample) %>%
+  full_join(mouse_meta)
+
+waltera$diet <- factor(waltera$diet, levels=c("ctrl", "cmc", "wsd"))
+#plot #actually it shows the expected trend, albeit at very low abundance
+#pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/MouseSPFDiet_Waltera.pdf")
+p <- ggplot(waltera, aes(x=diet, y=Abundance*100)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0) + 
+  annotate('segment', x=1, xend=3, y=0.024*100, yend=0.024*100) +
+  annotate('text', x=2, y=0.026*100, label=c("p=0.2")) +
+ theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  xlab("Diet") + ylab("Waltera (% Rel. Abund.)")
+p
+#dev.off()
+kruskal.test(waltera$Abundance ~ waltera$diet) #p=0.2
+
+#write out the Waltera abundance to correlate with other data.
+#write.csv(waltera, "/ebio/abt3_projects2/uHEAT/data/Mouse/SPF_Diet/waltera_abund.csv")
+
+#what about total Lachnospiraceae levels?
+lachno <- brk_cls %>% filter(Family=="Lachnospiraceae")  %>%
+  group_by(Sample, Family) %>% summarize(Abundance=sum(Abundance))
+
+#add metadata
+lachno <- lachno %>% rename(seq_id=Sample) %>%
+  full_join(mouse_meta)
+
+lachno$diet <- factor(lachno$diet, levels=c("ctrl", "cmc", "wsd"))
+
+#plot
+p <- ggplot(lachno, aes(x=diet, y=Abundance)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0)
+p #also shows the expected-ish trend albeit messy
+
+#how about Enterobacteriaceae?
+entero <- brk_cls %>% filter(Family=="Enterobacteriaceae")  %>%
+  group_by(Sample, Family) %>% summarize(Abundance=sum(Abundance))
+
+#add metadata
+entero <- entero %>% rename(seq_id=Sample) %>%
+  full_join(mouse_meta)
+
+entero$diet <- factor(entero$diet, levels=c("ctrl", "cmc", "wsd"))
+
+#plot
+p <- ggplot(entero, aes(x=diet, y=Abundance)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0)
+p #huh, no, it goes the opposite way; but its super low abund
+
+#Waltera abundance vs. IL-6 for the SPF mice. #I lost the plot and had to remake here, not sure where else it is
+#pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S13I_spf_walteraIL6.pdf")
+p <- ggplot(waltera, aes(x=IL6.24h.pg.mL, y=Abundance*100)) + geom_point() +
+  geom_smooth(method='lm') + 
+  theme_minimal() +
+  theme(axis.line = element_line(colour = "black")) +
+  xlab("Serum IL-6 (pg/mL)") + ylab("Waltera (% Rel. Abund.)") +
+  annotate('text', x=20, y=1.5, label=c("p=0.019\nrho=0.51"), hjust=0)
+p
+#dev.off()
+cor.test(waltera$IL6.24h.pg.mL, waltera$Abundance, method='spearman') #p=0.018, rho=0.513
+  
+
+```
+
+```{r barplots family}
+
+barplot_fam <- brk_cls %>% group_by(Sample, Family) %>% summarize(Abundance=sum(Abundance))
+taxa_to_keep <- barplot_fam %>% group_by(Family) %>% 
+  summarize(abund=sum(Abundance)) %>%
+  filter(abund>0) 
+taxa_to_keep[order(taxa_to_keep$abund, decreasing=TRUE),]
+
+top_taxa <- (head(taxa_to_keep[order(taxa_to_keep$abund, decreasing=TRUE),], 15))$Family #the other 2 are so minor
+
+barplot_fam$plot_taxa <- ifelse(barplot_fam$Family %in% top_taxa,
+                                     yes=barplot_fam$Family,
+                                     no="others")
+
+bar_plot <- barplot_fam %>% group_by(Sample, plot_taxa) %>% summarize(Abundance=sum(Abundance))
+
+#put the taxa in order so that "others" is last
+top_taxa_order <- c(top_taxa, "others")
+bar_plot$plot_taxa <- factor(bar_plot$plot_taxa,
+                               levels=top_taxa_order)
+
+#add metadata
+bar_plot <- bar_plot %>% rename(seq_id=Sample) %>%
+  full_join(mouse_meta)
+
+#define colours to use in plots #15 + others
+colours <- c("steelblue", "goldenrod1","forestgreen", "lightblue1", "lightpink", "red", 
+             "darkorchid3", "darkseagreen1", "khaki1",  "palevioletred", "darkturquoise", "honeydew4",
+             "gray95", "plum1", "blue", 
+             "black")
+
+#basic bar plot
+bar_plot$diet <- factor(bar_plot$diet, levels=c("ctrl", "cmc", "wsd"))
+bar_plot$mouse.ID <- factor(bar_plot$mouse.ID, levels=c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+                                                                           "11", "12", "13", "14", "15", "16", "17", "18", "19", "20",
+                                                                           "21", "22", "23", "24"))
+
+#pdf(width=10, height=5, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/mouse_spfdiet_barplot_fam.pdf")
+p <- ggplot(bar_plot, aes(mouse.ID, Abundance, fill=plot_taxa)) + 
+  geom_bar(stat="identity", colour="black") +
+  facet_grid(. ~ diet, drop=FALSE,scale="free",space="free_x") + 
+  theme_bw() +
+  labs(x="Sample", y="Proportion") + 
+  scale_y_continuous(expand = c(0,0)) + theme(strip.background = element_rect(fill="gray85")) +
+  scale_fill_manual(values = colours) + theme(panel.spacing = unit(0.3, "lines")) + 
+  theme(axis.text.x=element_text(angle=90,hjust=0.5,vjust=0.5)) + 
+  guides(fill=guide_legend(title="Family"))
+p
+#dev.off()
+
+```
+
+```{r prep data for maaslin and plotting}
+#make dataframes compatible for Maaslin2, at different taxonomic levels
+feces_df <- brk_cls %>% dplyr::select(Phylum, Family, Genus, Species, Sample, Abundance) %>% 
+  pivot_wider(names_from=Sample, values_from=Abundance)
+head(feces_df) 
+
+#species #essentially strain level
+feces_df_species <- feces_df %>% dplyr::select(-c(Phylum, Family, Genus)) %>% as.data.frame()
+row.names(feces_df_species) <- feces_df_species$Species
+feces_df_species$Species <- NULL
+mouse_meta <- mouse_meta[order(mouse_meta$seq_id),] #order
+mouse_meta <- mouse_meta %>% filter(seq_id %in% names(feces_df_species)) #filter - no missing mouse
+feces_df_species <- feces_df_species[,order(names(feces_df_species))] #order
+identical(names(feces_df_species), mouse_meta$seq_id)
+
+#genus
+feces_df_genus <- brk_cls %>% dplyr::select(Genus, Sample, Abundance) %>%
+  group_by(Sample, Genus) %>% summarize(Abundance=sum(Abundance)) %>%
+  pivot_wider(names_from=Sample, values_from=Abundance) %>%
+  as.data.frame()
+head(feces_df_genus)
+#cleanup
+feces_df_genus$Genus[1] <- "Unknown"
+row.names(feces_df_genus) <- feces_df_genus$Genus
+feces_df_genus$Genus <- NULL
+mouse_meta <- mouse_meta[order(mouse_meta$seq_id),] #order
+mouse_meta <- mouse_meta %>% filter(seq_id %in% names(feces_df_genus)) #filter - no missing mouse
+feces_df_genus <- feces_df_genus[,order(names(feces_df_genus))] #order
+identical(names(feces_df_genus), mouse_meta$seq_id)
+
+#later, for plotting
+plot_gen <- data.frame(t(feces_df_genus), mouse_meta)
+plot_spec <- data.frame(t(feces_df_species), mouse_meta)
+
+row.names(mouse_meta) <- mouse_meta$seq_id
+
+```
+
+
+```{r maaslin2}
+
+identical(names(feces_df_genus), mouse_meta$seq_id)
+
+##Q1 #by group #genus
+fit_data = Maaslin2(
+  input_data = feces_df_genus, 
+  input_metadata = mouse_meta, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth_mouse", "diet"),
+  reference=c("diet", "ctrl"), #ctrl diet as reference
+  #random_effects = c("Participant_ID"), #one time point only, no donor or time effects
+  normalization="tss", #total sum scaling
+  min_abundance=0.0001, #min abundance 10^-3; anything lower gets unbelievable
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+all_gen <- fit_data$results
+all_gen <-  all_gen %>% dplyr::filter(metadata=="diet") 
+all_gen %>% filter(qval<0.05) #as expected, Strep is the biggest hit in WSD 
+write.csv(all_gen, "/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/profiling/maaslin2_results/Mouse_SPFDiet_Genus_all.csv")
+
+#by endpoint antibodies, continuous
+fit_data = Maaslin2(
+  input_data = feces_df_genus, 
+  input_metadata = mouse_meta, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth_mouse", "IgG.endpoint"),
+  #reference=c("diet", "ctrl"), #ctrl diet as reference
+  #random_effects = c("Participant_ID"), #one time point only, no donor or time effects
+  normalization="tss", #total sum scaling
+  min_abundance=0.0001, #min abundance 10^-3; anything lower gets unbelievable
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+all_gen_igg <- fit_data$results
+all_gen_igg <-  all_gen_igg %>% dplyr::filter(metadata=="IgG.endpoint") 
+all_gen_igg %>% filter(qval<0.05) #nothing, aw.
+all_gen_igg[order(all_gen_igg$pval),] %>% filter(pval<0.05) #Streptococcus is in fact there at raw pval=0.005, qval=0.1 ; but it isn't the top hit
+#write.csv(all_gen_igg, "/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/profiling/maaslin2_results/Mouse_SPFDiet_Antibodies_Genus_all.csv")
+
+p <- ggplot(plot_gen, aes(x=log(Streptococcus), y=IgG.endpoint)) + geom_point() +
+  geom_smooth(method='lm')
+p #it's not that convincing since it's mostly zero in the other two groups
+
+#NB: previously in the human cohort I had noticed the Strep correlated with IgG levels 'corrected' for fever. Which would make sense if it's a mimicry thing, intsead of an adjuvant thing. Does the same principle apply here?
+
+plot_gen$IgG_relative <- plot_gen$IgG.endpoint / plot_gen$IL6.24h.pg.mL #IL6 being most accurate inflamm readout I think
+
+p <- ggplot(plot_gen, aes(x=log(Streptococcus), y=IgG_relative)) + geom_point() +
+  geom_smooth(method='lm')
+p #nope, doesn't help
+
+```
+
+```{r humann3 SPF}
+#genes - rna - unstratified
+hm3_genes <- fread("/ebio/abt3_projects2/uHEAT/data/Mouse/SPF_Diet/hum3/humann3/normalized/unstratified/regroup/annot/genefamilies_uniref50_default.tsv")
+names(hm3_genes) <- gsub("_Abundance-RPKs", "", names(hm3_genes), fixed=TRUE)
+
+hm3_genes <- hm3_genes %>% dplyr::rename(Gene=`# Gene Family`)
+row.names(hm3_genes) <- hm3_genes$Gene
+gene_key <- hm3_genes %>% dplyr::select(c(Gene, annotation)) #but then correct it to go with Maaslin2
+gene_key$Gene_unfixed <- gene_key$Gene
+gene_key$Gene <- gsub("-", ".", gene_key$Gene, fixed=TRUE)
+gene_key$Gene <- gsub(";", ".", gene_key$Gene, fixed=TRUE)
+gene_key$Gene <- gsub(":", ".", gene_key$Gene, fixed=TRUE)
+gene_key$Gene <- gsub(" ", ".", gene_key$Gene, fixed=TRUE)
+
+hm3_genes_M <- hm3_genes %>% as.data.frame() %>% dplyr::select(-c("annotation", "Gene")) #to refilter, start again here.
+head(hm3_genes_M)
+row.names(hm3_genes_M) <- hm3_genes$Gene
+
+mouse_meta <- mouse_meta[order(mouse_meta$seq_id),] #order
+hm3_genes_M <- hm3_genes_M[,order(names(hm3_genes_M))] #order
+identical(names(hm3_genes_M), mouse_meta$seq_id) #False - we are missing some samples for the gene-level data.
+row.names(mouse_meta) <- mouse_meta$seq_id
+
+```
+
+```{r hum3 test}
+fit_data = Maaslin2(
+  input_data = hm3_genes_M, 
+  input_metadata = mouse_meta, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth_mouse", "diet"),
+  reference=c("diet", "ctrl"), #ctrl diet as reference
+  #random_effects = c("Participant_ID"), #one time point only, no donor or time effects
+  normalization="tss", #total sum scaling
+  min_abundance=0.00001, #expand the threshold from 10^-3 to 10%-4 because genes?
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+res_hum <- fit_data$results
+res_hum %>% filter(qval<0.05&metadata=="diet") 
+hits3 <- fit_data$results %>% filter(qval<0.05&metadata=="diet")
+hm3_genes[which(hm3_genes$Gene %in% hits3$feature),] %>% dplyr::select(c(Gene, annotation)) %>% as.data.frame()
+#export 
+dietgenes <- gene_key %>% dplyr::rename(feature=Gene) %>% 
+  full_join(hits3) %>% filter(!is.na(coef))
+dietgenes 
+#a ton of top hits are transposases / phages/ DNA transfer, prob because of the streptococci
+#write.csv(dietgenes, "/ebio/abt3_projects2/uHEAT/code/R_code/Rscripts_server/maaslin2_output/DNAUniref50_MouseSPF_Diet.csv")
+
+#vs: export all for volcano plot.
+res_hum_all <- gene_key %>% dplyr::rename(feature=Gene) %>% 
+  full_join(res_hum) %>% filter(!is.na(coef))
+res_hum_all
+#write.csv(res_hum_all, "/ebio/abt3_projects2/uHEAT/code/R_code/Rscripts_server/maaslin2_output/DNAUniref50_MouseSPF_Diet_all.csv")
+
+
+grep("Flagellin", dietgenes$annotation) #none
+grep("Flagel*|Motility|CsrA|Chemotaxis", dietgenes$annotation, ignore.case = TRUE) #some, yes.
+dietgenes[grep("Flagel*|Motility|CsrA|Chemotaxis", dietgenes$annotation, ignore.case = TRUE),]$annotation #hmmmm
+View(dietgenes[grep("Flagel*|Motility|CsrA|Chemotaxis", dietgenes$annotation, ignore.case = TRUE),])
+
+#cool cool. how about the stratified version then? test flagellins only.
+
+```
+
+```{r hum3 strat flag}
+#genes - stratified
+hm3_genes_strat <- fread("/ebio/abt3_projects2/uHEAT/data/Mouse/SPF_Diet/hum3/humann3/normalized/stratified/regroup/annot/genefamilies_uniref50_default.tsv")
+names(hm3_genes_strat) <- gsub("_Abundance-RPKs", "", names(hm3_genes_strat), fixed=TRUE)
+
+hm3_genes_strat <- hm3_genes_strat %>% rename(Gene=`# Gene Family`)
+
+#pick flagellins and flagellin-related genes
+flag <- hm3_genes_strat[grep("Flagel*", hm3_genes_strat$annotation, ignore.case = TRUE),]
+flag %>% dplyr::select(Gene, annotation) %>% as.data.frame()
+
+#save annotations
+flag_key <- flag %>% dplyr::select(c(Gene, annotation)) #but then correct it to go with Maaslin2
+flag_key$rownames <- paste("V", row.names(flag_key), sep="")
+flag_key$Gene_unfixed <- flag_key$Gene
+flag_key$Gene <- gsub("-", ".", flag_key$Gene, fixed=TRUE)
+flag_key$Gene <- gsub(";", ".", flag_key$Gene, fixed=TRUE)
+flag_key$Gene <- gsub(":", ".", flag_key$Gene, fixed=TRUE)
+flag_key$Gene <- gsub(" ", ".", flag_key$Gene, fixed=TRUE)
+flag_key$Gene <- gsub("|", ".", flag_key$Gene, fixed=TRUE)
+head(as.data.frame(flag_key))
+row.names(flag) <- flag_key$Gene
+
+#export the flagellin key to inspect later
+#write.csv(flag_key, "/ebio/abt3_projects2/uHEAT/code/R_code/Rscripts_server/maaslin2_output/flag_stratified_key.csv")
+
+#get rid of the massive original file
+hm3_genes_strat <- NULL
+
+mouse_meta <- mouse_meta[order(mouse_meta$seq_id),] #order
+flag_M <- as.data.frame(flag)[,which(names(flag) %in% mouse_meta$seq_id)]
+flag_M <- flag_M[,order(names(flag_M))] #order
+row.names(flag_M) <- flag_key$Gene
+identical(names(flag_M), mouse_meta$seq_id) #no, some missing.
+row.names(mouse_meta) <- mouse_meta$seq_id
+head(flag_M)
+dim(flag_M) #4096 flagellin genes, 21 samples
+
+```
+
+```{r test strat}
+fit_data = Maaslin2(
+  input_data = flag_M, 
+  input_metadata = mouse_meta, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth_mouse", "diet"),
+  reference=c("diet", "ctrl"), #ctrl diet as reference
+  #random_effects = c("Participant_ID"), #one time point only, no donor or time effects
+  normalization="tss", #total sum scaling
+  min_abundance=0.00001, #expand the threshold from 10^-3 to 10%-4 because genes?
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+res_flag <- fit_data$results
+res_flag %>% filter(qval<0.05&metadata=="diet") 
+hitsF <- fit_data$results %>% filter(qval<0.05&metadata=="diet")
+
+#export 
+dietgenesF <- flag_key %>% dplyr::rename(feature=Gene) %>% 
+  full_join(hitsF) %>% filter(!is.na(coef))
+dietgenesF #it's actually a Lactococcus flagellin gene, in this case, that's up in WSD. And "Rheinheimera" (??) 
+
+#write.csv(dietgenesF, "/ebio/abt3_projects2/uHEAT/code/R_code/Rscripts_server/maaslin2_output/DNAUniref50_MouseSPF_Diet_FlagStrat.csv")
+
+grep("Flagellin", dietgenes$annotation) #none
+grep("Flagel*|Motility|CsrA|Chemotaxis", dietgenes$annotation, ignore.case = TRUE) #some, yes.
+dietgenes[grep("Flagel*|Motility|CsrA|Chemotaxis", dietgenes$annotation, ignore.case = TRUE),]$annotation #hmmmm
+View(dietgenes[grep("Flagel*|Motility|CsrA|Chemotaxis", dietgenes$annotation, ignore.case = TRUE),])
+
+```
+
+```{r plot hum3 flag hits}
+#FlgK flagellin length
+pdata <- as.data.frame(t(hm3_genes_M[which(row.names(hm3_genes_M) %in% dietgenes$Gene_unfixed),]))
+pdata$seq_id <- row.names(pdata)
+pdata <- full_join(pdata, mouse_meta)
+dietgenes[grep("Flagel*|Motility|CsrA|Chemotaxis", dietgenes$annotation, ignore.case = TRUE),]$Gene_unfixed 
+
+#FliK (#1) UniRef50_A0A0V8CSN4 #basically only in wsd
+p <- ggplot(pdata, aes(x=diet, y=UniRef50_A0A0V8CSN4)) + geom_boxplot() +
+  geom_jitter(width=0.1, height=0)
+p
+
+#FliK (#2) UniRef50_A0A0V8D8A4 #basically only in wsd
+p <- ggplot(pdata, aes(x=diet, y=UniRef50_A0A0V8D8A4)) + geom_boxplot() +
+  geom_jitter(width=0.1, height=0)
+p
+
+#Flag motor UniRef50_G4KYF3 #up in CMC
+p <- ggplot(pdata, aes(x=diet, y=`UniRef50_G4KYF3: Flagellar motor protein MotA`)) + geom_boxplot() +
+  geom_jitter(width=0.1, height=0)
+p
+
+#flag hydrolase UniRef50_A0A1I4EW54 #basically only in wsd
+p <- ggplot(pdata, aes(x=diet, y=UniRef50_A0A1I4EW54)) + geom_boxplot() +
+  geom_jitter(width=0.1, height=0)
+p
+
+```
+
+```{r hum3 volcano plot}
+dna_all <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/Rscripts_server/maaslin2_output/DNAUniref50_MouseSPF_Diet_all.csv", row.names=1)
+dna_all <- dna_all %>% filter(metadata=="diet"&value=="wsd") #for volcano, only one comparison
+
+mycolours <- c("deepskyblue4", "deepskyblue3", "firebrick4", "firebrick2", "grey")
+names(mycolours) <- c("DOWN q<0.05", "DOWN q<0.1", "UP q<0.05", "UP q<0.1",  "NO")
+dna_all$diffexpressed <- c("NO")
+dna_all$diffexpressed[dna_all$coef > 0 & dna_all$qval<0.1] <- c("UP q<0.1")
+dna_all$diffexpressed[dna_all$coef > 0 & dna_all$qval<0.05] <- c("UP q<0.05")
+dna_all$diffexpressed[dna_all$coef < 0 & dna_all$qval<0.1] <- c("DOWN q<0.1")
+dna_all$diffexpressed[dna_all$coef < 0 & dna_all$qval<0.05] <- c("DOWN q<0.05")
+# Create a new column "delabel" to de, that will contain the name of genes differentially 
+#this time only flagellins!
+
+flagellins <- dna_all[grep("Flagel*|Motility|CsrA|Chemotaxis", dna_all$annotation, ignore.case = TRUE),]$annotation
+#but I don't want the "gliding motility" ones, those are not relevant to flagellar motility
+gliding <- flagellins[grep("Gliding", flagellins)]
+flagellins <- flagellins[!(flagellins %in% c(gliding))]
+#also it makes sense to only show one set of comparisons
+
+
+dna_all$delabel <- ifelse(dna_all$diffexpressed!="NO"& (dna_all$annotation %in% flagellins),
+                          yes=dna_all$annotation, no=NA)
+
+#adjust the labels so that they are shorter and more legible.
+dna_all[which(!(is.na(dna_all$delabel))),]$delabel
+dna_all$annotation_simple <- case_when(grepl("Flagellin", dna_all$annotation)~"Flagellin",
+                                      grepl("FliS", dna_all$annotation)~"FliS",
+                                      grepl("FliW", dna_all$annotation)~"FliW",
+                                      grepl("FliL", dna_all$annotation)~"FliL",
+                                      grepl("FliK", dna_all$annotation)~"FliK",
+                                      grepl("FliF", dna_all$annotation)~"FliF",
+                                      grepl("FlgK1", dna_all$annotation)~"FlgK1",
+                                      grepl("FlgK2", dna_all$annotation)~"FlgK",
+                                      grepl("MotB", dna_all$annotation, ignore.case=TRUE)~"MotB",
+                                      grepl("CsrA", dna_all$annotation, ignore.case=TRUE)~"CsrA")
+dna_all$annotation_simple <- ifelse(is.na(dna_all$annotation_simple), yes=dna_all$annotation,
+                                       no=dna_all$annotation_simple)
+dna_all$delabel <- ifelse(dna_all$diffexpressed!="NO"& (dna_all$annotation %in% flagellins),
+                          yes=dna_all$annotation_simple, no=NA)
+
+
+#pdf(width=5, height=4, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S#.DNAVolcano_SPFDiet_Flagellins.pdf")
+p = ggplot(data=dna_all, aes(x=coef, y=-log10(pval), 
+                              col=diffexpressed, 
+                              label=delabel)) + 
+  ggtitle(expression("WSD vs Ctrl: Fecal Transcriptomics")) +
+  scale_colour_manual(values = mycolours) + 
+  geom_point(size=0.3, alpha=0.2) + 
+  theme_bw() +
+  guides(fill = guide_legend(override.aes = aes(label = ""))) + 
+  geom_text_repel(size=2,  max.overlaps = 20, segment.size=0.2, show.legend = FALSE, nudge_y=0.1,
+                  point.padding = 0.1)
+p
+#dev.off()
+
+
+```

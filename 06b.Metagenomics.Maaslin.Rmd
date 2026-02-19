@@ -1,0 +1,458 @@
+---
+title: "06b.Metagenomics.Maaslin"
+author: "Kelsey Huus"
+date: "2024-07-31"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+##Packages
+library(LeyLabRMisc)
+library(tidyr)
+library(data.table)
+library(tidytable)
+library(dplyr)
+library(Maaslin2)
+library(ggplot2)
+```
+
+```{r read_braken}
+#' Function for reading in a bracken taxonomy table
+#'
+#' The table will be converted to long form (sample ~ abundance).
+#' Only "_frac" or "_num" columns will be kept (see "keep_frac").
+#' Taxonomy will be split into separate levels (see "tax_levs").
+#' tidytable (w/ data.table) used to speed the process up.
+#'
+#' @param infile Path to bracken table file
+#' @param nrows Number of table rows to read. If Inf, all lines will be read.
+#' @param keep_frac If TRUE, keep all columns ending in "_frac"; otherwise, keep "_num" columns.
+#' @param tax_levs Taxonomic levels to separate the taxonomy column into.
+#' @param ... Params passed to fread()
+#' @return data.table
+#' @export
+#' @import tidytable
+#' @importFrom data.table fread
+#' 
+read_bracken = function(infile, nrows=Inf, keep_frac=TRUE,
+                        tax_levs = c('Domain', 'Phylum', 'Class', 'Order',
+                                     'Family', 'Genus', 'Species'),
+                        nThread = 4, ...){
+  if(keep_frac){
+    to_rm = '_num'
+    to_keep = '_frac'
+  } else {
+    to_rm = '_frac'
+    to_keep = '_num'
+  }
+  dt = data.table::fread(infile, sep='\t', nrows=nrows, check.names=TRUE,
+                         nThread=nThread, ...) %>%
+    tidytable::select(-taxIDs, -ends_with(!!to_rm)) %>%
+    tidytable::mutate(taxonomy = gsub(';[pcofgs]__', ';', taxonomy),
+                       taxonomy = gsub('^d__', '', taxonomy)) %>%
+    tidytable::separate(taxonomy, tax_levs, sep=';') %>%
+    tidytable::pivot_longer(cols=ends_with(!!to_keep),
+                               names_to='Sample',
+                               values_to='Abundance') %>%
+    tidytable::mutate(Sample = gsub('(_frac|_num)$', '', Sample))
+
+  return(dt)
+}
+
+```
+
+```{r import brk}
+#read in the brk_cls file
+##Read Files - rel abund
+#output of llmgp #update: instead, for re-analysis, read in the ids only or the filtered table only
+profile_dir <- "/ebio/abt3_projects2/uHEAT/data/output_kraken_all/kraken" #updated: no subsampling, GTDB map, all samples
+# listing files
+brk_cls_files = list_files(profile_dir, 'all-combined-bracken.tsv') 
+brk_cls_files %>% length()
+# reading tables
+brk_cls = brk_cls_files %>%
+  plyr::llply(read_bracken) %>%
+  data.table::rbindlist(use.names=TRUE, idcol='dataset')
+brk_cls
+names(brk_cls)
+
+#re-parse participant IDs for later merging
+brk_cls$Participant_ID <- sapply(strsplit(brk_cls$Sample,"_"), `[`, 1)
+brk_cls$Participant_ID <- gsub("H", "HEAT_", brk_cls$Participant_ID)
+
+#check the Abundance metric here, is it definitely relative?
+brk_cls %>% dplyr::group_by(Sample) %>% dplyr::summarize(sum(Abundance)) #yes! :)
+
+#check the sample IDs. are they all here?
+ids <- brk_cls %>% select(Sample) %>% filter(!duplicated(Sample))
+ids$Participant_ID <- sapply(strsplit(ids$Sample,"_"), `[`, 1)
+ids$Participant_ID <- gsub("H", "HEAT_", ids$Participant_ID)
+ids %>% group_by(Participant_ID) %>% count() #yes #looks very nice and complete
+#write.csv(ids, "/ebio/abt3_projects2/uHEAT/data/metadata/ids.csv")
+#ids <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/ids.csv", row.names=1)
+
+#keep a tax table
+tax <- brk_cls %>% select(Domain, Phylum, Class, Order, Family, Genus, Species, taxonomy_id) %>%
+  filter(!duplicated(taxonomy_id))
+#write.csv(tax, "/ebio/abt3_projects2/uHEAT/data/output_kraken_all/kraken/tax_table.csv")
+
+#per-sample metadata #note: mocks, blanks & samples with low read depth already excluded #so are old & infected samples
+#updated: this version also excludes SERIES 2 of all double series.
+meta_seq <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/meta_seq_clean_series1.24.08.18.csv", 
+                     row.names=1)
+
+#number of clean samples
+length(meta_seq$SampleID)
+
+#per-person metadata, matching
+meta <- meta_seq %>% filter(!duplicated(Participant_ID)&!is.na(fever7d_aboveavg)) %>%
+  dplyr::select(-c(SampleID, Relative_Day, Time0, Time01))
+dim(meta)
+
+```
+
+```{r maaslin2}
+
+#make dataframes compatible for Maaslin2, at different taxonomic levels
+feces_df <- brk_cls %>% select(Phylum, Family, Genus, Species, Sample, Abundance) %>% 
+  pivot_wider(names_from=Sample, values_from=Abundance)
+head(feces_df) 
+
+#species #essentially strain level
+feces_df_species <- feces_df %>% select(-c(Phylum, Family, Genus)) %>% as.data.frame()
+row.names(feces_df_species) <- feces_df_species$Species
+feces_df_species$Species <- NULL
+meta_seq <- meta_seq[order(meta_seq$SampleID),] #order
+feces_df_species <- feces_df_species[,which(names(feces_df_species)%in% meta_seq$SampleID)] #filter - no mocks, blanks
+feces_df_species <- feces_df_species[,order(names(feces_df_species))] #order
+identical(names(feces_df_species), meta_seq$SampleID)
+
+#genus
+feces_df_genus <- brk_cls %>% select(Genus, Sample, Abundance) %>%
+  group_by(Sample, Genus) %>% summarize(Abundance=sum(Abundance)) %>%
+  pivot_wider(names_from=Sample, values_from=Abundance) %>%
+  as.data.frame()
+head(feces_df_genus)
+#cleanup
+feces_df_genus$Genus[1] <- "Unknown"
+row.names(feces_df_genus) <- feces_df_genus$Genus
+feces_df_genus$Genus <- NULL
+feces_df_genus <- feces_df_genus[,which(names(feces_df_genus)%in% meta_seq$SampleID)] #filter - no mocks, blanks
+feces_df_genus <- feces_df_genus[,order(names(feces_df_genus))] #order
+identical(names(feces_df_genus), meta_seq$SampleID)
+colSums(feces_df_genus) #rounding errors
+row.names(feces_df_genus)
+
+#maybe I want this, e.g. for RNA-seq analysis
+#write.csv(feces_df_genus, "/ebio/abt3_projects2/uHEAT/data/output_kraken_all/feces_df_genus.csv")
+#feces_df_genus <- read.csv("/ebio/abt3_projects2/uHEAT/data/output_kraken_all/feces_df_genus.csv",
+#                           row.names=1)
+
+#family
+feces_df_fam <- brk_cls %>% select(Family, Sample, Abundance) %>%
+  dplyr::group_by(Sample, Family) %>% 
+  dplyr::summarize(Abundance=sum(Abundance)) %>%
+  pivot_wider(names_from=Sample, values_from=Abundance) %>%
+  as.data.frame()
+head(feces_df_fam)
+#cleanup
+feces_df_fam$Family[1] <- "Unknown"
+row.names(feces_df_fam) <- feces_df_fam$Family
+feces_df_fam$Family <- NULL
+feces_df_fam <- feces_df_fam[,which(names(feces_df_fam)%in% meta_seq$SampleID)] #filter - no mocks, blanks
+feces_df_fam <- feces_df_fam[,order(names(feces_df_fam))] #order
+meta_seq <- meta_seq[order(meta_seq$SampleID),] #order
+identical(names(feces_df_fam), meta_seq$SampleID)
+colSums(feces_df_fam) #rounding errors
+row.names(feces_df_fam)
+
+#write.csv(feces_df_fam, "/ebio/abt3_projects2/uHEAT/data/output_kraken_all/feces_df_family.csv")
+
+
+#later, for plotting
+plot_gen <- data.frame(t(feces_df_genus), meta_seq)
+plot_spec <- data.frame(t(feces_df_species), meta_seq)
+
+row.names(meta_seq) <- meta_seq$SampleID
+meta_seq$fever7d_aboveavg <- factor(meta_seq$fever7d_aboveavg, levels=c("lo", "hi"))
+#meta_seq$Bristol_Stool_Score2 <- ifelse(meta_seq$Bristol_Stool_Score2=="bNA",
+#                                        NA, meta_seq$Bristol_Stool_Score2) #BSS grouped
+meta_seq$Bristol_Stool_Score <- as.numeric(meta_seq$Bristol_Stool_Score)
+
+##Fever - overall (genus) #7d fever with technical covariates only
+fit_data = Maaslin2(
+  input_data = feces_df_genus, 
+  input_metadata = meta_seq, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth", "Bristol_Stool_Score", "Time_at_RT", "fever7d_aboveavg"),
+  random_effects = c("Participant_ID"), 
+  #reference=c("Sex", "m"), #tell it to use male as ref for Sex
+  normalization="tss", #total sum scaling
+  min_abundance=0.0001, #min abundance 10^-3; anything lower gets unbelievable
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+res_long_fevergen <- fit_data$results
+res_long_fevergen %>% dplyr::filter(qval<0.05&metadata=="fever7d_aboveavg") 
+
+#export results
+#write.csv(res_long_fevergen, "/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns/maaslin2_output/MetagenomicG_seqBSSTimeRT_fever7d.csv")
+
+##Fever - overall (species) #7d fever with technical covariates only
+fit_data = Maaslin2(
+  input_data = feces_df_species, 
+  input_metadata = meta_seq, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth", "Bristol_Stool_Score", "Time_at_RT", "fever7d_aboveavg"),
+  random_effects = c("Participant_ID"), 
+  #reference=c("Sex", "m"), #tell it to use plate 1 as the ref for plate compare / male as ref for Sex
+  normalization="tss", #total sum scaling
+  min_abundance=0.0001, #min abundance 10^-3; anything lower gets unbelievable
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+res_long_feverspec <- fit_data$results
+res_long_feverspec %>% dplyr::filter(qval<0.05&metadata=="fever7d_aboveavg") 
+tax %>% dplyr::filter(Genus=="Acetatifactor") %>% as.data.frame() %>% head()
+
+#export results
+#write.csv(res_long_feverspec, "/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns/maaslin2_output/MetagenomicS_seqBSSTimeRT_fever7d.csv")
+
+#baseline only
+meta_seq_baseline <- meta_seq %>% filter(Time01<0)
+feces_df_genus_baseline <- feces_df_genus[,which(names(feces_df_genus)%in%meta_seq_baseline$SampleID)]
+identical(names(feces_df_genus_baseline), meta_seq_baseline$SampleID)
+feces_df_species_baseline <- feces_df_species[,which(names(feces_df_species)%in%meta_seq_baseline$SampleID)]
+identical(names(feces_df_species_baseline), meta_seq_baseline$SampleID)
+
+row.names(meta_seq_baseline) <- meta_seq_baseline$SampleID
+
+fit_data = Maaslin2(
+  input_data = feces_df_genus_baseline, 
+  input_metadata = meta_seq_baseline, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth", "Bristol_Stool_Score", "Time_at_RT", "fever7d_aboveavg"),
+  random_effects = c("Participant_ID"),
+  #reference=c("Stool_timing_fever", "before"), 
+  normalization="tss", #total sum scaling
+  min_abundance=0.0001, #expand the threshold from 10^-3 to 10%-4 ?
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05,
+  plot_scatter=FALSE
+)
+res_long_fevergenbefore <- fit_data$results
+res_long_fevergenbefore %>% dplyr::filter(qval<0.05&metadata=="fever7d_aboveavg")
+
+fit_data = Maaslin2(
+  input_data = feces_df_species_baseline, 
+  input_metadata = meta_seq_baseline, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth", "Bristol_Stool_Score", "Time_at_RT", "fever7d_aboveavg"),
+  random_effects = c("Participant_ID"),
+  #reference=c("Stool_timing_fever", "before"), 
+  normalization="tss", #total sum scaling
+  min_abundance=0.0001, #expand the threshold from 10^-3 to 10%-4 ?
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05,
+  plot_scatter=FALSE
+)
+res_long_feverspecbefore <- fit_data$results
+res_long_feverspecbefore %>% dplyr::filter(qval<0.05&metadata=="fever7d_aboveavg")
+
+
+```
+
+
+```{r maaslin2 corr}
+
+##Fever - overall (genus) #7d fever with additional covariates only
+fit_data = Maaslin2(
+  input_data = feces_df_genus, 
+  input_metadata = meta_seq, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth", "Bristol_Stool_Score", "Time_at_RT", 
+                    "Sex", "Age", "Diet2", "BMI_kg_m2",
+                    "fever7d_aboveavg"),
+  random_effects = c("Participant_ID"), 
+  reference=c("Sex", "m"), #tell it to use male as ref for Sex
+  normalization="tss", #total sum scaling
+  min_abundance=0.0001, #min abundance 10^-3; anything lower gets unbelievable
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+res_long_fevergen_corr <- fit_data$results
+res_long_fevergen_corr %>% dplyr::filter(qval<0.05&metadata=="fever7d_aboveavg") 
+
+#export results
+#write.csv(res_long_fevergen, "/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns/maaslin2_output/MetagenomicG_seqBSSTimeRT_fever7d.csv")
+
+##Fever - overall (species) #7d fever with technical covariates only
+fit_data = Maaslin2(
+  input_data = feces_df_species, 
+  input_metadata = meta_seq, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth", "Bristol_Stool_Score", "Time_at_RT", 
+                    "Sex", "Age", "Diet2", "BMI_kg_m2",
+                    "fever7d_aboveavg"),
+  random_effects = c("Participant_ID"), 
+  reference=c("Sex", "m"), #tell it to use male as ref for Sex
+  normalization="tss", #total sum scaling
+  min_abundance=0.0001, #min abundance 10^-3; anything lower gets unbelievable
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+res_long_feverspec_corr <- fit_data$results
+res_long_feverspec_corr %>% dplyr::filter(qval<0.05&metadata=="fever7d_aboveavg") 
+
+#export results
+#write.csv(res_long_feverspec, "/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns/maaslin2_output/MetagenomicS_seqBSSTimeRT_fever7d.csv")
+
+#baseline only
+meta_seq_baseline <- meta_seq %>% filter(Time01<0)
+feces_df_genus_baseline <- feces_df_genus[,which(names(feces_df_genus)%in%meta_seq_baseline$SampleID)]
+identical(names(feces_df_genus_baseline), meta_seq_baseline$SampleID)
+feces_df_species_baseline <- feces_df_species[,which(names(feces_df_species)%in%meta_seq_baseline$SampleID)]
+identical(names(feces_df_species_baseline), meta_seq_baseline$SampleID)
+
+row.names(meta_seq_baseline) <- meta_seq_baseline$SampleID
+
+fit_data = Maaslin2(
+  input_data = feces_df_genus_baseline, 
+  input_metadata = meta_seq_baseline, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth", "Bristol_Stool_Score", "Time_at_RT", 
+                    "Sex", "Age", "Diet2", "BMI_kg_m2",
+                    "fever7d_aboveavg"),
+  random_effects = c("Participant_ID"),
+  reference=c("Sex", "m"), 
+  normalization="tss", #total sum scaling
+  min_abundance=0.0001, #expand the threshold from 10^-3 to 10%-4 ?
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05,
+  plot_scatter=FALSE
+)
+res_long_fevergenbefore_corr <- fit_data$results
+res_long_fevergenbefore_corr %>% dplyr::filter(qval<0.05&metadata=="fever7d_aboveavg")
+
+fit_data = Maaslin2(
+  input_data = feces_df_species_baseline, 
+  input_metadata = meta_seq_baseline, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth", "Bristol_Stool_Score", "Time_at_RT", 
+                    "Sex", "Age", "Diet2", "BMI_kg_m2",
+                    "fever7d_aboveavg"),
+  random_effects = c("Participant_ID"),
+  reference=c("Sex", "m"), 
+  normalization="tss", #total sum scaling
+  min_abundance=0.0001, #expand the threshold from 10^-3 to 10%-4 ?
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05,
+  plot_scatter=FALSE
+)
+res_long_feverspecbefore_corr <- fit_data$results
+res_long_feverspecbefore_corr %>% dplyr::filter(qval<0.05&metadata=="fever7d_aboveavg")
+
+```
+
+```{r plot}
+#genus Acetatifactor over time
+plot_gen$fever7d_aboveavg <- factor(plot_gen$fever7d_aboveavg, levels=c("lo", "hi"))
+pdata <- plot_gen %>% filter(!is.na(fever7d_aboveavg))
+
+pdata1 <- pdata %>% filter(!is.na(sample_no))
+pdata1$sample_no3 <- case_when(pdata1$sample_no==8 ~ 1,
+                               pdata1$sample_no==9 ~ 2,
+                               pdata1$sample_no==10 ~ 3,
+                               pdata1$sample_no==11 ~ 4,
+                               pdata1$sample_no==12 ~ 5,
+                               pdata1$sample_no==13 ~ 6)
+pdata1$sample_no3 <- ifelse(is.na(pdata1$sample_no3), 
+                            yes=pdata1$sample_no, no=pdata1$sample_no3)
+
+
+#pdf(width=4, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/3C.MetagenomicAcetatifactor.pdf")
+p <- ggplot(pdata1, aes(x=as.factor(sample_no3), y=log(Acetatifactor), colour=fever7d_aboveavg)) + geom_boxplot(outlier.size=NA, outlier.shape=NA)
+p <- p + geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0))
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + scale_colour_manual(values=c("grey50", "firebrick3"))
+#p <- p + scale_x_continuous(breaks=c(seq(-8, 8, by=1)))
+p <- p + annotate("segment", x=3.5, xend=3.5, y=-9, yend=-2, linetype=1)
+p <- p + annotate("text", x=3.5, y=-1.5, label=c("Vaccine"))
+p <- p + xlab("Timepoint") + ylab("Log Rel. Abund.") + ggtitle("Waltera") + labs(colour="Fever")
+p
+#dev.off()
+
+#Summarize Acetatifactor per person
+pdata2 <- pdata %>% group_by(Participant_ID, fever7d, fever7d_aboveavg) %>%
+  summarize(Acetatifactor=mean(Acetatifactor)) 
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/plots3/Fever7d_vs_Acetatifactor_sum1.pdf")
+p <- ggplot(pdata2, aes(x=fever7d_aboveavg, y=log(Acetatifactor), colour=fever7d_aboveavg)) + geom_boxplot(outlier.size=NA, outlier.shape=NA)
+p <- p + geom_jitter(width=0.1, height=0)
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + scale_colour_manual(values=c("grey50", "firebrick3"))
+p <- p + xlab("Fever") + ylab("Log Rel. Abund.") + ggtitle("Acetatifactor")
+p <- p + theme(legend.position="none")
+p
+#dev.off()
+
+
+```
+
+```{r genes dna maaslin2}
+#gene-level analysis
+hm3_genes_dna <- fread("/ebio/abt3_projects2/uHEAT/data/output_LLMGP_humann_all_rep/output_LLMGP_humann_pool3/humann3/normalized/unstratified/regroup/annot/genefamilies_uniref50_default.tsv")
+names(hm3_genes_dna) <- gsub("_Abundance-RPKs", "", names(hm3_genes_dna), fixed=TRUE)
+head(hm3_genes_dna)
+hm3_genes_dna <- hm3_genes_dna %>% rename(Gene=`# Gene Family`)
+
+hm3_genes_dna_M <- hm3_genes_dna %>% select(-c("annotation", "Gene"))
+head(hm3_genes_dna_M)
+hm3_genes_dna_M <- as.data.frame(hm3_genes_dna_M)
+row.names(hm3_genes_dna_M) <- hm3_genes_dna$Gene
+
+meta_seq <- meta_seq[order(meta_seq$SampleID),] #order
+hm3_genes_dna_M <- hm3_genes_dna_M[,which(names(hm3_genes_dna_M) %in% meta_seq$SampleID)] 
+hm3_genes_dna_M <- hm3_genes_dna_M[,order(names(hm3_genes_dna_M))] #order
+names(hm3_genes_dna_M)==meta_seq$SampleID #cleaned up again
+row.names(meta_seq) <- meta_seq$SampleID
+row.names(hm3_genes_dna_M)
+
+hm3_genes_dna <- NULL #because it's so big, get rid of it!
+
+#test by gene - this takes hours
+fit_data = Maaslin2(
+  input_data = hm3_genes_dna_M, 
+  input_metadata = meta_seq, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth", "Bristol_Stool_Score", "Time_at_RT", "fever7d_aboveavg"), 
+  random_effects = c("Participant_ID"), 
+  #reference=c("Sex", "m"), #tell it to use plate 1 as the ref for plate compare / male as ref for Sex
+  normalization="tss", #total sum scaling
+  min_abundance=0.00001, #expand the threshold from 10^-3 to 10%-4 because genes?
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+res_long_fevergenes_dna <- fit_data$results 
+res_long_fevergenes_dna %>% filter(qval<0.05&metadata=="fever_aboveavg") 
+
+#export immediately
+hits_dna <- fit_data$results %>% filter(pval<0.05&metadata=="fever_aboveavg")
+hits_dna
+genes_dna <- gene_key %>% dplyr::rename(feature=Gene) %>% 
+  full_join(hits_dna) %>% filter(!is.na(coef))
+#write.csv(genes_dna, "/ebio/abt3_projects2/uHEAT2/data/output_LLMGP_RNA_all/maaslin2_output/Uniref50_fever_original_DNA_hits.csv")
+genes_dna[grep("flagell*", genes_dna$annotation, ignore.case=TRUE),] #FlgB comes up, not sig though; FliC does not
+genes_dna[grep("flagell*", genes_dna$feature, ignore.case=TRUE),] #FlgB comes up, not sig though; FliC does not
+
+```
+

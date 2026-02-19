@@ -1,0 +1,797 @@
+---
+title: "07b.Transcriptomics.Maaslin"
+author: "Kelsey Huus"
+date: "2024-07-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+##Packages
+library(LeyLabRMisc)
+library(tidyr)
+library(data.table)
+#library(tidytable)
+library(dplyr)
+library(Maaslin2)
+library(ggplot2)
+```
+
+```{r read_braken}
+#' Function for reading in a bracken taxonomy table
+#'
+#' The table will be converted to long form (sample ~ abundance).
+#' Only "_frac" or "_num" columns will be kept (see "keep_frac").
+#' Taxonomy will be split into separate levels (see "tax_levs").
+#' tidytable (w/ data.table) used to speed the process up.
+#'
+#' @param infile Path to bracken table file
+#' @param nrows Number of table rows to read. If Inf, all lines will be read.
+#' @param keep_frac If TRUE, keep all columns ending in "_frac"; otherwise, keep "_num" columns.
+#' @param tax_levs Taxonomic levels to separate the taxonomy column into.
+#' @param ... Params passed to fread()
+#' @return data.table
+#' @export
+#' @import tidytable
+#' @importFrom data.table fread
+#' 
+read_bracken = function(infile, nrows=Inf, keep_frac=TRUE,
+                        tax_levs = c('Domain', 'Phylum', 'Class', 'Order',
+                                     'Family', 'Genus', 'Species'),
+                        nThread = 4, ...){
+  if(keep_frac){
+    to_rm = '_num'
+    to_keep = '_frac'
+  } else {
+    to_rm = '_frac'
+    to_keep = '_num'
+  }
+  dt = data.table::fread(infile, sep='\t', nrows=nrows, check.names=TRUE,
+                         nThread=nThread, ...) %>%
+    tidytable::select(-taxIDs, -ends_with(!!to_rm)) %>%
+    tidytable::mutate(taxonomy = gsub(';[pcofgs]__', ';', taxonomy),
+                       taxonomy = gsub('^d__', '', taxonomy)) %>%
+    tidytable::separate(taxonomy, tax_levs, sep=';') %>%
+    tidytable::pivot_longer(cols=ends_with(!!to_keep),
+                               names_to='Sample',
+                               values_to='Abundance') %>%
+    tidytable::mutate(Sample = gsub('(_frac|_num)$', '', Sample))
+
+  return(dt)
+}
+
+```
+
+
+```{r import1 RNA abund}
+#7d fever with RNA seq depth, etc - updated
+meta_seq <- read.csv("/ebio/abt3_projects2/uHEAT2/data/metadata/meta_seq_rna_fever7d_series1_24.08.18.csv") 
+#number of clean samples
+
+##Read Files - rel abund
+#output of llmgp
+profile_dir <- "/ebio/abt3_projects2/uHEAT2/data/output_LLMGP_RNA_all/kraken" #updated: all, no subsampling, GTDB map, May 15 2023
+# listing files
+brk_cls_files = list_files(profile_dir, 'all-combined-bracken.tsv') 
+brk_cls_files %>% length
+# reading tables
+brk_cls = brk_cls_files %>%
+  plyr::llply(read_bracken) %>%
+  data.table::rbindlist(use.names=TRUE, idcol='dataset')
+brk_cls
+names(brk_cls)
+
+#re-parse participant IDs for later merging
+brk_cls$Participant_ID <- sapply(strsplit(brk_cls$Sample,"_"), `[`, 1)
+brk_cls$Participant_ID <- gsub("H", "HEAT_", brk_cls$Participant_ID)
+brk_cls$sample_no <- sapply(strsplit(brk_cls$Sample,"_"), `[`, 2)
+
+#check the Abundance metric here, is it definitely relative?
+brk_cls %>% dplyr::group_by(Sample) %>% dplyr::summarize(sum(Abundance)) #yes? but it adds up to 0.994, not 1?
+
+#check the sample IDs. are they all here?
+brk_cls %>% group_by(Participant_ID) %>% count() #
+brk_cls %>% group_by(Participant_ID) %>% count() %>% dim() #yes
+
+```
+
+```{r giant barplot genus RNA}
+
+#define colours to use in plots #25 + others
+#source the same as the DNA plot
+source("barplot_colours.R")
+
+feces_tax <- brk_cls %>% 
+  dplyr::filter(Sample %in% meta_seq$SampleID)  %>% #only correct samples
+  dplyr::group_by(Genus) %>% 
+  dplyr::summarize(abund=sum(Abundance)) #if running after previous chunk: renamed to "RNA_Abundance"
+#move all but the 25 most abundant taxa into an 'others' category
+#top_taxa <- (head(feces_tax[order(feces_tax$abund, decreasing=TRUE),], 25))$Genus
+#except, for easy comparison to DNA: use the same 25 genera that are included in the DNA plot, and in the same order
+top_taxa <- names(taxa_colours)
+
+
+feces <- brk_cls %>% mutate(plot_taxa=ifelse(Genus %in% top_taxa,
+                                             yes=Genus,
+                                             no="others"))
+
+feces_plot <- feces %>% 
+  dplyr::filter(Sample %in% meta_seq$SampleID)%>% #only correct samples
+  dplyr::group_by(Sample, plot_taxa) %>% 
+  dplyr::summarize(Abundance=sum(Abundance))
+#put the taxa in order so that "others" is last
+feces_plot$plot_taxa <- factor(feces_plot$plot_taxa,
+                              levels=top_taxa)
+#seperate by sample_no
+feces_plot$sample_no <- sapply(strsplit(feces_plot$Sample,"_"), `[`, 2)
+#keep only sample nos 1-6 #and only relevant samples
+feces_plot <- feces_plot %>% filter(sample_no %in% c("1", "2", "3", "4", "5", "6")) 
+
+#order by most abundant genus, e.g., Bacteroides
+#pull a participant id to double check that all are included
+feces_plot$Participant_ID <- sapply(strsplit(feces_plot$Sample,"_"), `[`, 1)
+feces_plot$Participant_ID <- gsub("H", "HEAT_", feces_plot$Participant_ID)
+
+# First, get Bacteroides or Prevotella abundances for all samples
+bact_abund <- feces_plot %>% 
+  ungroup() %>%
+  filter(plot_taxa == "Bacteroides") %>%
+  select(Sample, Abundance, Participant_ID)
+#is bacteroides 100% prevalent?
+dplyr::count(ungroup(feces_plot), Participant_ID)
+dplyr::count(ungroup(bact_abund), Participant_ID)
+
+# Order samples by Bacteroides abundance
+ordered_samples <- bact_abund %>%
+  arrange(desc(Abundance)) %>%
+  pull(Sample)
+
+# Relevel the Sample factor
+feces_plot <- ungroup(feces_plot)
+feces_plot$Sample <- factor(feces_plot$Sample, levels = ordered_samples)
+
+#basic bar plot
+#pdf(width=7, height=5, "/ebio/abt3_projects2/uHEAT/data/plots5/giant_barplot_genus_RNA.pdf")
+p <- ggplot(feces_plot, aes(Sample, Abundance, fill=plot_taxa)) + geom_bar(stat="identity")
+#coord_flip() +
+#facet_grid(. ~ Diet, drop=FALSE,scale="free",space="free_x") + theme_bw() 
+p <- p + labs(x="Sample", y="Proportion") + 
+  scale_y_continuous(expand = c(0,0)) + theme(strip.background = element_rect(fill="gray85")) +
+  scale_fill_manual(values = taxa_colours) +theme(panel.spacing = unit(0.3, "lines")) +
+  theme(axis.text.x=element_blank()) + 
+  guides(fill=guide_legend(title="Taxa")) +
+facet_wrap(~ sample_no, scales = "free_x", nrow = 1)
+p
+#dev.off()
+
+```
+
+```{r top dna and rna taxa overall}
+brk_cls_dna <- read.csv("/ebio/abt3_projects2/uHEAT2/data/brk_cls_dna_for_rnasamples.csv")
+
+brk_cls$taxonomy_id <- as.double(brk_cls$taxonomy_id)
+brk_cls <- brk_cls %>% rename(RNA_Abundance=Abundance)
+brk_cls_dna <- brk_cls_dna %>% rename(DNA_Abundance=Abundance)
+brk_cls_dnarna <- full_join(brk_cls_dna, brk_cls)
+#and now, before we go farther; try to do a prevalence cutoff of 20% at DNA level
+head(brk_cls_dna)
+#total number of samples with sequencing
+brk_cls_dna %>% count(Sample) %>% dim() #n=242
+dna_prev <- brk_cls_dna %>% group_by(Species) %>% count(DNA_Abundance>0) %>% 
+  as.data.frame() %>% filter(`DNA_Abundance > 0`==FALSE&n<242*0.8) #"false" are zeroes #less than 80% zeros i.e. >20% prev
+dna_prev #great, much nicer list
+brk_cls_dnarna <- brk_cls_dnarna %>% filter(Species %in% dna_prev$Species)
+#interpret missing RNA abundance as zeroes
+brk_cls_dnarna$RNA_Abundance <- ifelse(is.na(brk_cls_dnarna$RNA_Abundance), yes=0, no=brk_cls_dnarna$RNA_Abundance)
+#define ratio
+brk_cls_dnarna$RNA_DNA_ratio <- brk_cls_dnarna$RNA_Abundance / brk_cls_dnarna$DNA_Abundance
+head(brk_cls_dnarna) #sometimes both are zero, you divide by zero so you get NaN; or one is missing
+#if the DNA abundance is zero but the RNA abundance was also zero, flag it as a 'reasonable zero' i.e. reasonabnle NaN
+brk_cls_dnarna$Zero_match <- ifelse(brk_cls_dnarna$DNA_Abundance==0&brk_cls_dnarna$RNA_Abundance==0,
+                                       "yes", "no")
+
+#repeat the plots side by side for both DNA and RNA abundance (genus level)
+taxa_plot <- brk_cls_dnarna %>% 
+  filter(!is.na(DNA_Abundance)&!is.na(RNA_Abundance)) %>%
+  dplyr::group_by(Genus, Sample, Participant_ID) %>% 
+  dplyr::summarize(dna_abund=sum(DNA_Abundance), rna_abund=sum(RNA_Abundance)) %>% #sum genera per sample
+  ungroup() %>%
+  dplyr::group_by(Genus) %>%
+  dplyr::summarize(dna_abund=median(dna_abund), rna_abund=median(rna_abund)) #median genera abundance across dataset
+taxa_plot
+
+#top most abundant taxa - DNA
+top_taxa_dna <- (head(taxa_plot[order(taxa_plot$dna_abund, decreasing=TRUE),], 25))
+top_taxa_dna %>% as.data.frame() #Acetatifactor is #17
+
+#top most abundant taxa - RNA
+top_taxa_rna <- (head(taxa_plot[order(taxa_plot$rna_abund, decreasing=TRUE),], 25))
+top_taxa_rna %>% as.data.frame() #Acetatifactor is not in the list
+
+
+```
+
+
+```{r rna abund maaslin2}
+
+#transcriptionally active bugs
+feces_df <- brk_cls %>% select(Phylum, Family, Genus, Species, Sample, RNA_Abundance) %>% pivot_wider(names_from=Sample, values_from=RNA_Abundance)
+head(feces_df)
+
+#genus
+feces_df_genus <- brk_cls %>% select(Genus, Sample, RNA_Abundance) %>%
+  group_by(Sample, Genus) %>% summarize(Abundance=sum(RNA_Abundance)) %>%
+  pivot_wider(names_from=Sample, values_from=Abundance) %>%
+  as.data.frame()
+head(feces_df_genus)
+#cleanup
+feces_df_genus$Genus[1] <- "Unknown"
+row.names(feces_df_genus) <- feces_df_genus$Genus
+feces_df_genus$Genus <- NULL
+feces_df_genus <- feces_df_genus[,order(names(feces_df_genus))] #order
+feces_df_genus <- feces_df_genus[,which(names(feces_df_genus) %in% meta_seq$SampleID)] #order
+meta_seq <- meta_seq[order(meta_seq$SampleID),]
+row.names(meta_seq) <- meta_seq$SampleID
+identical(names(feces_df_genus), meta_seq$SampleID)
+
+#later, for plotting
+plot_gen <- data.frame(t(feces_df_genus), meta_seq)
+
+#genus level
+#should control for known ('technical') covariates: BSS, plate id, time frozen
+fit_data = Maaslin2(
+  input_data = feces_df_genus, 
+  input_metadata = meta_seq, 
+  output = "maaslin2_output", 
+  fixed_effects = c("RNA_seq_depth", "Bristol_Stool_Score2", "Time_at_RT", "fever7d_aboveavg"),
+  random_effects = c("Participant_ID"), 
+  reference=c("Bristol_Stool_Score2", "b3-4.5"), #tell it to use plate 1 as the ref for plate compare / male as ref for Sex
+  normalization="tss", #total sum scaling
+  min_abundance=0.0001, #expand the threshold from 10^-3 to 10%-4 ?
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05, 
+  plot_scatter=FALSE
+)
+res_long_fever <- fit_data$results %>% filter(qval<0.05)
+res_long_fever %>% filter(metadata=="fever7d_aboveavg") #Acetatifactor RNA is also enriched in high-fever samples
+
+#directly check: is the ratio of RNA to DNA, per sample, higher by fever in Acetatifactor?
+
+#repeat the plots side by side for both DNA and RNA abundance (genus level)
+W_plot <- brk_cls_dnarna %>% 
+  filter(Genus=="Acetatifactor") %>% 
+  group_by(Genus, Sample, Participant_ID) %>% 
+  summarize(dna_abund=sum(DNA_Abundance), rna_abund=sum(RNA_Abundance)) #sum genera per sample
+W_plot
+W_plot$RNADNA_ratio <- W_plot$rna_abund / W_plot$dna_abund #redefine ratio per sample
+
+#add metadata
+W_plot <- W_plot %>% select(-c(Participant_ID)) %>% rename(SampleID=Sample) %>% full_join(meta_seq)
+
+#Waltera RNA abundance over time, per sample
+W_plot <- W_plot %>% filter(!is.na(sample_no))
+W_plot$sample_no3 <- case_when(W_plot$sample_no==8 ~ 1,
+                               W_plot$sample_no==9 ~ 2,
+                               W_plot$sample_no==10 ~ 3,
+                               W_plot$sample_no==11 ~ 4,
+                               W_plot$sample_no==12 ~ 5,
+                               W_plot$sample_no==13 ~ 6)
+W_plot$sample_no3 <- ifelse(is.na(W_plot$sample_no3), 
+                            yes=W_plot$sample_no, no=W_plot$sample_no3)
+W_plot$fever7d_aboveavg <- factor(W_plot$fever7d_aboveavg, levels=c("lo", "hi"))
+
+
+#pdf(width=4, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/#.Acetatifactor.RNAAbund.pdf")
+p <- ggplot(W_plot, aes(x=as.factor(sample_no3), y=log(RNADNA_ratio), colour=fever7d_aboveavg)) + geom_boxplot(outlier.size=NA, outlier.shape=NA) + 
+  geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) + 
+  #annotate("segment", x=3.5, xend=3.5, y=-9, yend=-2, linetype=1) + 
+  #annotate("text", x=3.5, y=-1.5, label=c("Vaccine")) + 
+  xlab("Timepoint") + ylab("Log Rel. Abund.") + ggtitle("Waltera") + labs(colour="Fever")
+p
+#dev.off()
+
+#the transcriptional activity of Waltera is increased in fever-high samples. (?)
+#OR: the transcriptional activity of other things decreased. Since it's a relative abundance of RNA thing.
+#pdf(width=4, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/#.Acetatifactor.RNADNARatio.pdf")
+p <- ggplot(W_plot, aes(x=as.factor(sample_no3), y=log(rna_abund), colour=fever7d_aboveavg)) + geom_boxplot(outlier.size=NA, outlier.shape=NA) + 
+  geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) + 
+  #annotate("segment", x=3.5, xend=3.5, y=-9, yend=-2, linetype=1) + 
+  #annotate("text", x=3.5, y=-1.5, label=c("Vaccine")) + 
+  xlab("Timepoint") + ylab("Log Rel. Abund.") + ggtitle("Waltera") + labs(colour="Fever")
+p
+#dev.off()
+
+```
+
+```{r import}
+#7d fever with RNA seq depth, etc - updated
+meta_seq <- read.csv("/ebio/abt3_projects2/uHEAT2/data/metadata/meta_seq_rna_fever7d_24.08.15.csv") #these are RAW PVAL hits.
+#genes - rna - unstratified
+hm3_genes <- fread("/ebio/abt3_projects2/uHEAT2/data/output_LLMGP_RNA_all/humann3/normalized/unstratified/regroup/annot/genefamilies_uniref50_default.tsv")
+names(hm3_genes) <- gsub("_Abundance-RPKs", "", names(hm3_genes), fixed=TRUE)
+
+hm3_genes <- hm3_genes %>% dplyr::rename(Gene=`# Gene Family`)
+row.names(hm3_genes) <- hm3_genes$Gene
+gene_key <- hm3_genes %>% select(c(Gene, annotation)) #but then correct it to go with Maaslin2
+gene_key$Gene_unfixed <- gene_key$Gene
+gene_key$Gene <- gsub("-", ".", gene_key$Gene, fixed=TRUE)
+gene_key$Gene <- gsub(";", ".", gene_key$Gene, fixed=TRUE)
+gene_key$Gene <- gsub(":", ".", gene_key$Gene, fixed=TRUE)
+gene_key$Gene <- gsub(" ", ".", gene_key$Gene, fixed=TRUE)
+#write.csv(gene_key, "/ebio/abt3_projects2/uHEAT2/data/output_LLMGP_RNA_all/humann3/uniref50_genekey.csv")
+#gene_key <- read.csv("/ebio/abt3_projects2/uHEAT2/data/output_LLMGP_RNA_all/humann3/uniref50_genekey.csv")
+
+hm3_genes_M <- hm3_genes %>% as.data.frame() %>% dplyr::select(-c("annotation", "Gene")) #to refilter, start again here.
+head(hm3_genes_M)
+row.names(hm3_genes_M) <- hm3_genes$Gene
+
+meta_seq <- meta_seq[order(meta_seq$SampleID),] #order
+meta_seq <- meta_seq[which(meta_seq$SampleID %in% names(hm3_genes_M)),] #if I didn't filter above - make sure I have only the RNA samples, not all of them
+hm3_genes_M <- hm3_genes_M[,which(names(hm3_genes_M) %in% meta_seq$SampleID)] #and if it's the stringent metadata, kick out the infected samples too
+hm3_genes_M <- hm3_genes_M[,order(names(hm3_genes_M))] #order
+identical(names(hm3_genes_M), meta_seq$SampleID) #cleaned up again
+row.names(meta_seq) <- meta_seq$SampleID
+
+meta_seq$fever7d_aboveavg <- factor(meta_seq$fever7d_aboveavg, levels=c("lo", "hi"))
+
+```
+
+```{r maaslin2 rna genes}
+
+##Fever - overall #7d fever with technical covariates only
+fit_data = Maaslin2(
+  input_data = hm3_genes_M, 
+  input_metadata = meta_seq, 
+  output = "maaslin2_output", 
+  fixed_effects = c("RNA_seq_depth", "Bristol_Stool_Score", "Time_at_RT", "fever7d_aboveavg"),
+  random_effects = c("Participant_ID"), 
+  #reference=c("Sex", "m"), #tell it to use plate 1 as the ref for plate compare / male as ref for Sex
+  normalization="tss", #total sum scaling
+  min_abundance=0.00001, #expand the threshold from 10^-3 to 10%-4 because genes?
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+res_long_fevergenes3 <- fit_data$results
+res_long_fevergenes3 %>% filter(qval<0.05&metadata=="fever7d_aboveavg") #does not include FliC...
+hits3b <- fit_data$results %>% filter(pval<0.05&metadata=="fever7d_aboveavg")
+hm3_genes[which(hm3_genes$Gene %in% hits3b$feature),] %>% select(c(Gene, annotation)) %>% as.data.frame()
+#export before it crashes again!!!
+f7genes <- gene_key %>% dplyr::rename(feature=Gene) %>% 
+  full_join(hits3b) %>% filter(!is.na(coef))
+f7genes
+#write.csv(f7genes, "/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns/maaslin2_output/RNAUniref50_Fever7d_aboveavg_hits.csv") #flagellin is also here
+
+```
+
+```{r rna plot1}
+#flagellins only
+flagellin_hits <- f7genes[grep("Flag*|Mot*", f7genes$annotation),]
+flagellin_hits[order(flagellin_hits$qval),] %>% as.data.frame()
+
+pdata <- hm3_genes_M[which(row.names(hm3_genes_M)%in%flagellin_hits$Gene_unfixed),]
+pdata_t <- as.data.frame(t(pdata))
+pdata_t$SampleID <- row.names(pdata_t)
+pdata <- pivot_longer(pdata_t, cols=c(1:length(flagellin_hits$Gene_unfixed)),
+                      names_to="Flagellin", values_to="RelAbund")
+
+pdata <- pdata %>% full_join(meta_seq) %>%
+  group_by(Participant_ID, fever7d_aboveavg, Flagellin) %>%
+  summarize(RelAbund=mean(RelAbund))
+
+pdata$fever7d_aboveavg <- factor(pdata$fever7d_aboveavg, levels=c("lo", "hi"))
+
+#aesthetic label changes
+pdata$UniRef <- sapply(strsplit(pdata$Flagellin, ":",), `[`, 1)
+pdata$UniRef <- gsub("UniRef50_", "", pdata$UniRef)
+#and add back an annotation, and significance information
+pdata <- as.data.frame(flagellin_hits) %>% dplyr::rename(Flagellin=Gene_unfixed) %>%
+  full_join(pdata)
+pdata$UniRef_annotation <- paste(pdata$annotation, pdata$UniRef, sep="_")
+#and further shorten / simplify
+pdata$UniRef_annotation <- gsub(" protein", "", pdata$UniRef_annotation)
+pdata$UniRef_annotation <- gsub("Flagellar secretion chaperone FliS", "FliS chaperone", pdata$UniRef_annotation)
+#order by median abundance in fever+
+abund <- pdata %>% filter(fever7d_aboveavg=="hi") %>% group_by(UniRef_annotation) %>% summarize(Abundance=median(RelAbund))
+pdata$UniRef_annotation <- factor(pdata$UniRef_annotation,                                   
+                          levels = abund$UniRef_annotation[order(abund$Abundance, decreasing = TRUE)])
+
+#pdf(width=4.5, height=4, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/3E.RNAFlagellins.pdf")
+p <- ggplot(pdata, aes(x=UniRef_annotation, y=log(RelAbund), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) 
+p <- p + geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0))
+p <- p + scale_colour_manual(values=c("grey50", "firebrick3")) + theme_bw()
+p <- p + ylab("Log RNA Rel. Abund.") + labs(colour="Fever") + xlab(NULL)
+p <- p + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+p
+#dev.off()
+
+```
+
+
+```{r maaslin2 dna}
+#matching DNA models run on the same samples.
+#genes - unstratified
+hm3_genes_dna <- fread("/ebio/abt3_projects2/uHEAT/data/output_LLMGP_humann_all_rep/output_LLMGP_humann_pool3/humann3/normalized/unstratified/regroup/annot/genefamilies_uniref50_default.tsv")
+names(hm3_genes_dna) <- gsub("_Abundance-RPKs", "", names(hm3_genes_dna), fixed=TRUE)
+head(hm3_genes_dna)
+hm3_genes_dna <- hm3_genes_dna %>% rename(Gene=`# Gene Family`)
+
+#fix the double participant ID problem 
+#H179 is the 2nd set for H051, 
+names(hm3_genes_dna) <- gsub("H179_1", "H051_8", names(hm3_genes_dna))
+names(hm3_genes_dna) <- gsub("H179_2", "H051_9", names(hm3_genes_dna))
+names(hm3_genes_dna) <- gsub("H179_3", "H051_10", names(hm3_genes_dna))
+names(hm3_genes_dna) <- gsub("H179_4", "H051_11", names(hm3_genes_dna))
+names(hm3_genes_dna) <- gsub("H179_5", "H051_12", names(hm3_genes_dna))
+names(hm3_genes_dna) <- gsub("H179_6", "H051_13", names(hm3_genes_dna))
+
+hm3_genes_dna_M <- hm3_genes_dna %>% select(-c("annotation", "Gene"))
+head(hm3_genes_dna_M)
+hm3_genes_dna_M <- as.data.frame(hm3_genes_dna_M)
+row.names(hm3_genes_dna_M) <- hm3_genes_dna$Gene
+
+meta_seq <- meta_seq[order(meta_seq$SampleID),] #order
+#meta_seq <- meta_seq[which(meta_seq$SampleID %in% names(hm3_genes_dna_M)),] #if I didn't filter above - make sure I have only the RNA samples, not all of them
+hm3_genes_dna_M <- hm3_genes_dna_M[,which(names(hm3_genes_dna_M) %in% meta_seq$SampleID)] #kick out all samples for which no RNA-seq.
+hm3_genes_dna_M <- hm3_genes_dna_M[,order(names(hm3_genes_dna_M))] #order
+names(hm3_genes_dna_M)==meta_seq$SampleID #cleaned up again
+row.names(meta_seq) <- meta_seq$SampleID
+row.names(hm3_genes_dna_M)
+
+hm3_genes_dna <- NULL #because it's so big, get rid of it!
+
+#skip the Maaslin2 models for DNA alone - they are slow and also unnecessary 
+```
+
+```{r maaslin2 rna/dna define ratio}
+###OK. Relative RNA to DNA expression, across all genes. Los gehts!
+identical(names(hm3_genes_M), names(hm3_genes_dna_M))
+hm3_genes_dna_M_filt <- hm3_genes_dna_M[which(row.names(hm3_genes_dna_M)%in%row.names(hm3_genes_M)),] #select only genes which also appear in RNA
+hm3_genes_M_filt <- hm3_genes_M[which(row.names(hm3_genes_M)%in%row.names(hm3_genes_dna_M_filt)),] #and vice versa
+row.names(hm3_genes_dna_M_filt)==row.names(hm3_genes_M_filt)
+hm3_genes_rel <- hm3_genes_M_filt/(hm3_genes_dna_M_filt+0.0000001) #entire dataframe at once with pseudocount
+names(hm3_genes_rel)==meta_seq$SampleID
+#write.csv(hm3_genes_rel, "/ebio/abt3_projects2/uHEAT2/data/output_LLMGP_RNA_all/humann3/normalized/unstratified/regroup/annot/genefamilies_uniref50_default_rnavsdna.tsv")
+#hm3_genes_rel <- fread("/ebio/abt3_projects2/uHEAT2/data/output_LLMGP_RNA_all/humann3/normalized/unstratified/regroup/annot/genefamilies_uniref50_default_rnavsdna.tsv")
+#GeneIDs <- hm3_genes_rel$V1
+#hm3_genes_rel$V1 <- NULL
+#hm3_genes_rel <- as.data.frame(hm3_genes_rel)
+#row.names(hm3_genes_rel) <- gsub(" ", ".", GeneIDs, fixed=TRUE)
+
+#for sequencing depth: what would I control for, here? both? relative sequencing depth?
+meta_seq$RNA_DNA_seq_depth <- meta_seq$RNA_seq_depth / meta_seq$DNA_seq_depth 
+meta_seq <- meta_seq[which(meta_seq$SampleID %in% names(hm3_genes_rel)),] #if I didn't filter above - make sure I have only the RNA samples, not all of them
+
+identical(names(hm3_genes_rel), meta_seq$SampleID)
+row.names(meta_seq) <- meta_seq$SampleID
+row.names(hm3_genes_rel)
+
+```
+
+```{r rna/dna maaslin2}
+
+#now, test via Maaslin2: without TSS, because it makes no sense for ratios
+#WARNING: this takes ≥10 hours
+fit_data = Maaslin2(
+  input_data = hm3_genes_rel, 
+  input_metadata = meta_seq, 
+  output = "maaslin2_output", 
+  fixed_effects = c("RNA_DNA_seq_depth", "Bristol_Stool_Score", "Time_at_RT", "fever7d_aboveavg"), #use relative seq depth, RNA vs DNA
+  random_effects = c("Participant_ID"), 
+  normalization="NONE", #no additional normalizaation for ratios
+  #min_abundance=0.00001, #no reasonable min abund for ratios
+  min_prevalence=0.25, #must be present in 25% of samples #may want to increase this
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+res_long_fevergenes_rnadna <- fit_data$results 
+res_long_fevergenes_rnadna %>% filter(qval<0.05&metadata=="fever7d_aboveavg") #lots.. .and mostly the same as before
+
+#export immediately
+hits_rnadna <- res_long_fevergenes_rnadna %>% filter(pval<0.05&metadata=="fever7d_aboveavg")
+hits_rnadna
+genes_rnadna <- gene_key %>% dplyr::rename(feature=Gene) %>% 
+  full_join(hits_rnadna) %>% filter(!is.na(coef))
+genes_rnadna
+#write.csv(genes_rnadna, "/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns/maaslin2_output/RNADNAUniref50_Fever7d_aboveavg_hits.csv") 
+
+```
+
+```{r plot rnadna}
+
+#plot all flagellins output as I did for the RNA
+#genes_rnadna <- read.csv("/ebio/abt3_projects2/uHEAT2/data/output_LLMGP_RNA_all/maaslin2_output/Uniref50_fever7d_RNADNA_hits.csv")
+flag_hits <- c(genes_rnadna[grep("flagell*", genes_rnadna$annotation, ignore.case=TRUE),]$feature, genes_rnadna[grep("flagell*", genes_rnadna$feature, ignore.case=TRUE),]$feature)
+flag_hits
+#but also add the chemotaxis proteins that I noticed manually, the ones that don't have flagellin in them as a name
+flag_hits <- c(flag_hits, "UniRef50_R6EA67..Chemotaxis.protein.MotB", 
+               "UniRef50_R6EFX3..Methyl.accepting.chemotaxis.sensory.transducer",
+               "UniRef50_R6K6Y3..Methyl.accepting.chemotaxis.protein", 
+               "UniRef50_A0A173W830"
+               )
+genes_rnadna_sig <- genes_rnadna %>% filter(qval<0.05)
+flag_hits_sig <- flag_hits[flag_hits %in% genes_rnadna_sig$feature]
+flag_hits_sig
+
+hm3_genes_rel$Uniref <- gsub(" ", ".", row.names(hm3_genes_rel), fixed=TRUE)
+hm3_genes_rel$Uniref <- gsub(":", ".", hm3_genes_rel$Uniref, fixed=TRUE)
+hm3_genes_rel$Uniref <- gsub("-", ".", hm3_genes_rel$Uniref, fixed=TRUE)
+hm3_genes_rel$Uniref <- gsub(";", ".", hm3_genes_rel$Uniref, fixed=TRUE)
+hm3_genes_rel$Uniref <- gsub("|", ".", hm3_genes_rel$Uniref, fixed=TRUE)
+hm3_genes_rel$Uniref <- gsub("(", ".", hm3_genes_rel$Uniref, fixed=TRUE)
+hm3_genes_rel$Uniref <- gsub(")", ".", hm3_genes_rel$Uniref, fixed=TRUE)
+data_flag <- hm3_genes_rel %>% filter(Uniref %in% flag_hits_sig)
+data_flag #boo, still missing some. #oh, no it's ok, some are repeats
+flag_hits_sig[!(flag_hits_sig %in% data_flag$Uniref)] #caught them all.
+#hm3_genes_rel[grep("UniRef50_K1SZY1", hm3_genes_rel$Uniref),]$Uniref
+
+#add metadata
+data_flag$Uniref <- NULL
+names(data_flag)==meta_seq$SampleID
+pdata <- data.frame(t(data_flag), meta_seq)
+names(pdata)
+pdata1 <- pdata %>% pivot_longer(cols=c(1:16), names_to="Flagellin", values_to="RNA_vs_DNA") #CHANGE COLUMN NUM
+pdata1 <- pdata1 %>% group_by(Participant_ID, Flagellin, fever7d_aboveavg) %>%
+  summarize(RNA_vs_DNA=mean(RNA_vs_DNA))
+#order by median rel abundance in fever+
+abund <- pdata1 %>% filter(fever7d_aboveavg=="hi") %>% group_by(Flagellin) %>% summarize(Abundance=median(RNA_vs_DNA))
+pdata1$Flagellin <- factor(pdata1$Flagellin,                                   
+                           levels = abund$Flagellin[order(abund$Abundance, decreasing = FALSE)])
+
+#Finally: replace the flagellins again with some kind of meaningful annotation.
+pdata2 <- gene_key %>% rename(Flagellin=Gene) %>% full_join(pdata1) %>% filter(!is.na(RNA_vs_DNA))
+pdata2$Uniref <- sapply(strsplit(pdata2$Flagellin,".", fixed=TRUE), `[`, 1)
+pdata2$Uniref
+pdata2$Uniref_annot <- sapply(strsplit(pdata2$Flagellin,"..", fixed=TRUE), `[`, 2)
+
+pdata2$annotation_full <- ifelse(is.na(pdata2$annotation), yes=gsub(".", " ", pdata2$Uniref_annot, fixed=TRUE),
+                                       no=pdata2$annotation)
+pdata2$annotation_simple <- case_when(grepl("Flagellin", pdata2$annotation_full)~"Flagellin",
+                                      grepl("FliS", pdata2$annotation_full)~"FliS chaperone",
+                                      grepl("FliW", pdata2$annotation_full)~"FliW assembly factor",
+                                      grepl("FliL", pdata2$annotation_full)~"FliL motor protein",
+                                      grepl("hook", pdata2$annotation_full, ignore.case=TRUE)~"Flagellar hook",
+                                      grepl("chemotaxis", pdata2$annotation_full, ignore.case=TRUE)~"Chemotaxis protein",
+                                      grepl("basal", pdata2$annotation_full, ignore.case=TRUE)~"Flagellar basal body")
+
+pdata2$annotation_simple 
+
+#re-order order pdata by Uniref abund? or by annotation?
+abund <- pdata2 %>% filter(fever7d_aboveavg=="hi") %>% group_by(Uniref) %>% summarize(Abundance=median(RNA_vs_DNA))
+#abund2 <- pdata2 %>% group_by(annotation_simple) %>% summarize(Abundance=median(RNA_vs_DNA))
+pdata2$Uniref <- factor(pdata2$Uniref,                                   
+                           levels = abund$Uniref[order(abund$Abundance, decreasing = TRUE)])
+annot_colours <- c("seagreen2", "darkturquoise", "deepskyblue", "goldenrod2", "plum3", "darkseagreen3", "paleturquoise1")
+#and then, seperately annotation which ones are which? with an extra small key?
+#pdf(width=6, height=4, "/ebio/abt3_projects2/uHEAT2/data/plots/Flagellins_all_RelExpr_fever7d_RelQVAL_hits_only_forPPT_LEGEND.pdf")
+p <- ggplot(pdata2, aes(x=Uniref, fill=annotation_simple)) + geom_bar()
+p <- p + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+p <- p + scale_fill_manual(values=annot_colours) + labs(fill="Annotation")
+p
+#dev.off()
+
+pdata2$fever7d_aboveavg <- factor(pdata2$fever7d_aboveavg, levels=c("lo", "hi")) #ah no, this is still nice hm.
+
+#pdf(width=6, height=4, "/ebio/abt3_projects2/uHEAT2/data/plots/Flagellins_all_RelExpr_fever7d_RelQVAL_hits_only_forPPT.pdf")
+p <- ggplot(pdata2, aes(x=Uniref, y=log(RNA_vs_DNA), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) 
+p <- p + geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0))
+p <- p + scale_colour_manual(values=c("grey50", "firebrick3")) + theme_bw()
+p <- p + ylab("Log RNA Rel. Expr.") + labs(colour="Fever") + xlab(NULL)
+p <- p + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+p
+#dev.off()
+
+##alternative plot: take ONLY flagellins, real flagellins, at q<0.1.
+#plot all flagellins output as I did for the RNA
+flag_hits2 <- c(genes_rnadna[grep("Flagellin", genes_rnadna$annotation, ignore.case=TRUE),]$feature, genes_rnadna[grep("Flagellin", genes_rnadna$feature, ignore.case=TRUE),]$feature)
+flag_hits2
+genes_rnadna_sig2 <- genes_rnadna %>% filter(qval<0.1)
+flag_hits_sig2 <- flag_hits2[flag_hits2 %in% genes_rnadna_sig2$feature]
+flag_hits_sig2
+
+data_flag2 <- hm3_genes_rel %>% filter(Uniref %in% flag_hits_sig2)
+data_flag2 #boo, still missing some. #oh, no it's ok, some are repeats
+flag_hits_sig2[!(flag_hits_sig2 %in% data_flag2$Uniref)] #caught them all.
+
+#add metadata
+data_flag2$Uniref <- NULL
+names(data_flag2)==meta_seq$SampleID
+pdata <- data.frame(t(data_flag2), meta_seq)
+pdata1 <- pdata %>% pivot_longer(cols=c(1:7), names_to="Flagellin", values_to="RNA_vs_DNA")
+pdata1 <- pdata1 %>% group_by(Participant_ID, Flagellin, fever7d_aboveavg) %>%
+  summarize(RNA_vs_DNA=mean(RNA_vs_DNA))
+#make a Uniref annotation
+pdata1$Uniref <- sapply(strsplit(pdata1$Flagellin, "..", fixed=TRUE), `[`, 1)
+pdata1$Uniref
+#order by median rel abundance in fever+
+abund <- pdata1 %>% filter(fever7d_aboveavg=="hi") %>% group_by(Uniref) %>% summarize(Abundance=median(RNA_vs_DNA))
+pdata1$Uniref <- factor(pdata1$Uniref,                                   
+                           levels = abund$Uniref[order(abund$Abundance, decreasing = TRUE)])
+#make a silent/stimulatory legend.
+pdata1$Activity <- case_when(pdata1$Uniref=="UniRef50_R6ZZ21"~"Silent",
+                             pdata1$Uniref=="UniRef50_R5QHX6"~"Stimulatory",
+                             !pdata1$Uniref%in%c("UniRef50_R6ZZ21", "UniRef50_R5QHX6")~"Unknown")
+
+annot_colours <- c("grey", "black", "white")
+#and then, seperately annotation which ones are which? with an extra small key?
+#pdf(width=5, height=3, "/ebio/abt3_projects2/uHEAT2/data/plots/Flagellins_all_RelExpr_fever7d_RelQVAL_flagellinhits_only_forPPT_LEGEND.pdf")
+p <- ggplot(pdata1, aes(x=Uniref, fill=Activity)) + geom_bar()
+p <- p + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+p <- p + scale_fill_manual(values=annot_colours)
+p
+#dev.off()
+
+pdata1$fever7d_aboveavg <- factor(pdata1$fever7d_aboveavg, levels=c("lo","hi"))
+
+#pdf(width=5, height=3, "/ebio/abt3_projects2/uHEAT2/data/plots/Flagellins_all_RelExpr_fever7d_RelQVAL_flagellinhits_only_forPPT.pdf")
+p <- ggplot(pdata1, aes(x=Uniref, y=log(RNA_vs_DNA), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) 
+p <- p + geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0))
+p <- p + scale_colour_manual(values=c("grey50", "firebrick3")) + theme_bw()
+p <- p + ylab("Log RNA Rel. Expr.") + labs(colour="Fever") + xlab(NULL)
+p <- p + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+p
+#dev.off()
+
+#Finally: replace the flagellins again with some kind of meaningful annotation.
+pdata2 <- gene_key %>% rename(Flagellin=Gene) %>% full_join(pdata1) %>% filter(!is.na(RNA_vs_DNA))
+pdata2$Uniref <- sapply(strsplit(pdata2$Flagellin,".", fixed=TRUE), `[`, 1)
+pdata2$Uniref
+pdata2$Uniref_annot <- sapply(strsplit(pdata2$Flagellin,"..", fixed=TRUE), `[`, 2)
+
+pdata2$annotation_full <- ifelse(is.na(pdata2$annotation), yes=gsub(".", " ", pdata2$Uniref_annot, fixed=TRUE),
+                                 no=pdata2$annotation)
+pdata2$annotation_simple <- case_when(grepl("Flagellin", pdata2$annotation_full)~"Flagellin",
+                                      grepl("FliS", pdata2$annotation_full)~"FliS chaperone",
+                                      grepl("FliW", pdata2$annotation_full)~"FliW assembly factor",
+                                      grepl("FliL", pdata2$annotation_full)~"FliL motor protein",
+                                      grepl("hook", pdata2$annotation_full, ignore.case=TRUE)~"Flagellar hook",
+                                      grepl("chemotaxis", pdata2$annotation_full, ignore.case=TRUE)~"Chemotaxis protein",
+                                      grepl("basal", pdata2$annotation_full, ignore.case=TRUE)~"Flagellar basal body")
+
+pdata2$annotation_simple 
+pdata2$IgG_B2_aboveavg <- factor(pdata2$IgG_B2_aboveavg, levels=c("lo", "hi"))
+#re-order order pdata by abund total
+abund <- pdata2 %>% group_by(Uniref) %>% summarize(Abundance=median(RNA_vs_DNA))
+#abund2 <- pdata2 %>% group_by(annotation_simple) %>% summarize(Abundance=median(RNA_vs_DNA))
+pdata2$Uniref <- factor(pdata2$Uniref,                                   
+                        levels = abund$Uniref[order(abund$Abundance, decreasing = TRUE)])
+
+
+#pdf(width=6, height=4, "/ebio/abt3_projects2/uHEAT2/data/plots/Flagellins_all_RelExprHits_vs_IgGB2.pdf")
+p <- ggplot(pdata2, aes(x=Uniref, y=log(RNA_vs_DNA), colour=IgG_B2_aboveavg)) + geom_boxplot(outlier.shape=NA) 
+p <- p + geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0))
+p <- p + scale_colour_manual(values=c("lightblue", "darkblue")) + theme_bw()
+p <- p + ylab("Log RNA Rel. Expr.") + labs(colour="IgG B2") + xlab(NULL)
+p <- p + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+p
+#dev.off()
+
+
+
+```
+
+```{r maaslin2 stratified genes flagellin}
+#genes - stratified
+hm3_genes_strat <- fread("/ebio/abt3_projects2/uHEAT2/data/output_LLMGP_RNA_all/humann3/normalized/stratified/regroup/annot/genefamilies_uniref50_default.tsv")
+names(hm3_genes_strat) <- gsub("_Abundance-RPKs", "", names(hm3_genes_strat), fixed=TRUE)
+
+hm3_genes_strat <- hm3_genes_strat %>% rename(Gene=`# Gene Family`)
+
+#pick flagellins only
+flag <- hm3_genes_strat[grep("flagel*", hm3_genes_strat$annotation, ignore.case=TRUE),]
+flag %>% select(Gene, annotation)
+flag[grep("FliC", flag$annotation),] #ACETATIFACTOR!!!!!!!
+#get rid of the massive original file
+hm3_genes_strat <- NULL
+
+#fix the double participant ID problem 
+#H179 is the 2nd set for H051, 
+names(flag) <- gsub("H179_1", "H051_8", names(flag))
+names(flag) <- gsub("H179_2", "H051_9", names(flag))
+names(flag) <- gsub("H179_3", "H051_10", names(flag))
+names(flag) <- gsub("H179_4", "H051_11", names(flag))
+names(flag) <- gsub("H179_5", "H051_12", names(flag))
+names(flag) <- gsub("H179_6", "H051_13", names(flag))
+
+flag_M <- flag %>% as.data.frame %>% select(-c("annotation", "Gene"))
+head(flag_M)
+
+meta_seq <- meta_seq[order(meta_seq$SampleID),] #order
+flag_M <- flag_M[,which(names(flag_M) %in% meta_seq$SampleID)]
+flag_M <- flag_M[,order(names(flag_M))] #order
+names(flag_M)==meta_seq$SampleID
+row.names(meta_seq) <- meta_seq$SampleID
+
+plot_flag <- data.frame(t(flag_M), meta_seq)
+
+#Now repeat for 7d and for other fever
+#with fever7d
+fit_data = Maaslin2(
+  input_data = flag_M, 
+  input_metadata = meta_seq, 
+  output = "maaslin2_output", 
+  fixed_effects = c("RNA_seq_depth", "Bristol_Stool_Score2", "Time_at_RT", "fever7d_aboveavg"),
+  random_effects = c("Participant_ID"), 
+  #reference=c("Sex", "m"), #tell it to use plate 1 as the ref for plate compare / male as ref for Sex
+  normalization="tss", #total sum scaling
+  #min_abundance=0.00001, #no abundance threshold here?
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+flag_fevergenes <- fit_data$results %>% filter(qval<0.05)
+flag_fevergenes %>% filter(metadata=="Bristol_Stool_Score2") #SO MANY things JESUS
+flag_fevergenes %>% filter(metadata=="RNA_seq_depth") #okay well
+flag_fevergenes %>% filter(metadata=="Time_at_RT") #nothing
+flag_fevergenes %>% filter(metadata=="fever7d_aboveavg") #Acetatifactor
+hits7 <- flag_fevergenes %>% filter(metadata=="fever7d_aboveavg")
+hits7b <- fit_data$results %>% filter(pval<0.05&metadata=="fever7d_aboveavg") #slightly more relaxed?
+hits7b #yes, they are all Lachnos. Of course they are all Lachnos.
+
+flag_maaslin_annot %>% filter(Gene %in% hits7b$feature) #one is regulatory, the rest are structural
+
+#summarize stratified taxa for Mosbach ppt
+hits_strat <- read.csv("/ebio/abt3_projects2/uHEAT2/data/output_LLMGP_RNA_all/maaslin2_output/Uniref50_fever7d_strat_hits.csv",
+                       row.names=1)
+head(hits_strat)
+summary(hits_strat$qval)
+summary(hits_strat$pval) #just to check how it is filtered. All raw hits.
+
+hits_strat$Taxa <- sapply(strsplit(hits_strat$Gene,"|", fixed=TRUE), `[`, 2)
+hits_strat$Genus <- sapply(strsplit(hits_strat$Taxa,"g__", fixed=TRUE), `[`, 2)
+hits_strat$Genus <- sapply(strsplit(hits_strat$Genus,";s__", fixed=TRUE), `[`, 1)
+#add family affilitation
+#taxonomy annotations
+tax <- read.csv("/ebio/abt3_projects2/uHEAT/data/output_kraken_all/kraken/tax_table.csv",row.names=1)
+pdata <- hits_strat %>% full_join(tax) %>% filter(!is.na(qval)) %>% filter(!duplicated(Gene))
+head(pdata)
+
+#Make a tiny stacked barchart?
+#define colours to use in plot
+colours <- c("steelblue", "goldenrod1","forestgreen", "lightblue1", "lightpink", "red", 
+             "darkorchid3", "darkseagreen1", "gray95")
+
+
+#for genus: include a top taxa thing
+genus_summary <- dplyr::count(pdata, Genus) %>% as.data.frame() %>% mutate(per=n/sum(n)*100)
+genus_summary
+top_taxa <- (head(genus_summary[order(genus_summary$per, decreasing=TRUE),], 8))$Genus #3 or more flagellins each - top 8
+
+genus_summary$plot_taxa <- ifelse(genus_summary$Genus %in% top_taxa,
+                              yes=genus_summary$Genus,
+                              no="Others")
+
+taxa_plot <- genus_summary %>% group_by(plot_taxa) %>% 
+  summarize(per=sum(per)) #add all the 'others' together.
+
+#put the taxa in order so that "others" is last
+top_taxa_order <- c(top_taxa, "Others")
+taxa_plot$plot_taxa <- factor(taxa_plot$plot_taxa,
+                              levels=top_taxa_order)
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT2/data/plots/Flagellin_Genus_Summary.pdf")
+p <- ggplot(taxa_plot, aes(x=c("Genus"), y=per, fill=plot_taxa)) + geom_bar(stat="identity", colour="black")
+p <- p + labs(x=NULL, y="Proportion")
+p <- p + scale_y_continuous(expand = c(0,0))
+p <- p + scale_fill_manual(values = colours)
+p <- p + theme(strip.background = element_rect(colour="white", fill="white"), axis.text.x=element_text(angle=90,hjust=0.5,vjust=0.5))
+p <- p + guides(fill=guide_legend(title="Genus"))
+p
+#dev.off()
+
+```
+
+```{r maaslin2 stratified genes waltera}
+walt_hits <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/Rscripts_server/maaslin2_output/Uniref50_fever7d_strat_waltera_acetatifactor_hits.csv")
+walt_hits_sig <- walt_hits %>% filter(qval<0.05)
+dim(walt_hits_sig) #huge number of hits, some of which are flagellin
+
+```

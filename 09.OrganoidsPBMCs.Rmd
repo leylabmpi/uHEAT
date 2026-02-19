@@ -1,0 +1,1098 @@
+---
+title: "09.Organoids"
+author: "Kelsey Huus"
+date: "2024-08-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(edgeR)
+library(ggplot2)
+library(biomaRt)
+#library(data.table)
+library(ggrepel)
+
+```
+
+```{r metadata}
+#per-sample metadata #note: mocks, blanks & samples with low read depth already excluded #so are old & infected samples
+#updated: this version also excludes SERIES 2 of all double series.
+meta_seq <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/meta_seq_clean_series1.24.08.18.csv", 
+                     row.names=1)
+meta_seq$Bristol_Stool_Score2 <- ifelse(meta_seq$Bristol_Stool_Score2=="bNA", yes=NA, no=meta_seq$Bristol_Stool_Score2) #correct BSS label error
+
+#number of clean samples
+length(meta_seq$SampleID)
+
+#per-person metadata, matching
+meta <- meta_seq %>% filter(!duplicated(Participant_ID)&!is.na(fever7d_aboveavg)) %>%
+  dplyr::select(-c(SampleID, Relative_Day, Time0, Time01))
+dim(meta)
+
+#define DIET 3
+meta$Diet3 <- ifelse(meta$Diet %in% c("Vegan", "Vegetarian"), yes="Veg", no="Omni")
+meta_seq$Diet3 <- ifelse(meta_seq$Diet %in% c("Vegan", "Vegetarian"), yes="Veg", no="Omni")
+
+```
+
+```{r cytokines plot}
+il8_4h_all <- read.csv("/ebio/abt3_projects2/uHEAT/data/Organoid_RNAseq/cytokines/IL8_4h_bothreps.csv", row.names=1)
+
+pdata <- il8_4h_all %>% filter(FeverFlagellin %in% c("Hi", "Lo"))
+pdata$Fever <- factor(pdata$FeverFlagellin, levels=c("Lo", "Hi"))
+
+wilcox.test(pdata$IL8~pdata$FeverFlagellin) #p=0.040
+#double check final N
+dim(pdata)
+pdata$Fever <- gsub("Lo", "lo", pdata$Fever)
+pdata$Fever <- gsub("Hi", "hi", pdata$Fever)
+pdata$Fever <- factor(pdata$Fever, levels=c("lo", "hi"))
+
+#is there a plate effect or a rep effect?
+pdata$Rep.Plate <- paste(pdata$Rep, pdata$Plate, sep=".")
+p <- ggplot(pdata, aes(x=Rep.Plate, y=IL8)) + geom_boxplot(outlier.shape = NA) + geom_jitter(width=0.1, height=0)
+p
+#doesn't seem to be as strong of a one as in rep 3, although maybe slightly
+
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/5A.IL8.4h.pdf")
+p <- ggplot(pdata, aes(x=Fever, y=IL8)) + geom_boxplot(outlier.shape=NA, outlier.size=NA) + 
+  geom_jitter(width=0.1, height=0, size=3) + 
+  ylab("IL8 (pg/mL)") + 
+  annotate('segment', x=1, xend=2, y=2800, yend=2800) + 
+  annotate('text', x=1.5, y=2875, label=c("*"), size=5) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  ylab("IL-8 (pg/mL)") + xlab("Fever")
+p
+#dev.off()
+
+#facet by Rep 4h
+p <- ggplot(pdata, aes(x=Fever, y=IL8)) + geom_boxplot(outlier.shape=NA, outlier.size=NA) + 
+  geom_jitter(width=0.1, height=0, size=3) + 
+  ylab("IL8 (pg/mL)") + 
+  annotate('segment', x=1, xend=2, y=2800, yend=2800) + 
+  annotate('text', x=1.5, y=2875, label=c("*"), size=5) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  ylab("IL-8 (pg/mL)") + xlab("Fever") +
+  facet_grid(.~Rep)
+p
+
+#I flagged 4 samples in rep 2 where the visual fever is incongruant
+pdata$FLAG <- ifelse(pdata$SampleID %in% gsub("HEAT_", "H", trouble), "flag", NA)
+#interestingly, yes, the fever high-IL-8 'fever-lo' sample was flagged by visual scoring as fever-high (visual scoring was blinded to existing category)
+#and it is indeed H043, which I labelled as having a convincing fever visually (0.7ºC so borderline by def)
+p <- ggplot(pdata, aes(x=Fever, y=IL8)) + 
+  geom_boxplot(outlier.shape=NA, outlier.size=NA) + 
+  geom_jitter(width=0.1, height=0, size=3, aes(shape=Rep, colour=FLAG)) + 
+  ylab("IL8 (pg/mL)") + 
+  annotate('segment', x=1, xend=2, y=2800, yend=2800) + 
+  annotate('text', x=1.5, y=2875, label=c("*"), size=5) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  ylab("IL-8 (pg/mL)") + xlab("Fever") +
+  geom_text(aes(label=SampleID))
+p
+
+#pdf(width=4, height=4, "/Users/khuus/ownCloud/KH-Postdoc/µHeat/OrganoidExperiments/4h_IL8_bothreps_byrep.pdf")
+p <- ggplot(pdata, aes(x=Fever, y=IL8, shape=Rep)) + geom_boxplot(outlier.shape=NA, outlier.size=NA) + geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0))
+p <- p + ylab("IL8 (pg/mL)")
+p
+#dev.off()
+
+il8_18h_all <- read.csv("/ebio/abt3_projects2/uHEAT/data/Organoid_RNAseq/cytokines/IL8_18h_bothreps.csv", row.names=1)
+
+pdata <- il8_18h_all %>% filter(FeverFlagellin %in% c("Hi", "Lo"))
+pdata$Fever <- factor(pdata$FeverFlagellin, levels=c("Lo", "Hi"))
+wilcox.test(pdata$IL8~pdata$FeverFlagellin) #p=0.044 
+pdata$Fever <- gsub("Lo", "lo", pdata$Fever)
+pdata$Fever <- gsub("Hi", "hi", pdata$Fever)
+pdata$Fever <- factor(pdata$Fever, levels=c("lo", "hi"))
+
+#is there a plate effect or a rep effect?
+pdata$Rep.Plate <- paste(pdata$Rep, pdata$Plate, sep=".")
+p <- ggplot(pdata, aes(x=Rep.Plate, y=IL8)) + geom_boxplot(outlier.shape = NA) + geom_jitter(width=0.1, height=0)
+p
+#doesn't seem to be as strong of a one as in rep 3, although maybe slightly (higher signal in rep 2 generally)
+
+
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/5A.IL8.18h.pdf")
+p <- ggplot(pdata, aes(x=Fever, y=IL8)) + geom_boxplot(outlier.shape=NA, outlier.size=NA) + geom_jitter(width=0.1, alpha=0.8, height=0) + 
+  ylab("IL8 (pg/mL)") + 
+  annotate('segment', x=1, xend=2, y=12500, yend=12500) + 
+  annotate('text', x=1.5, y=12650, label=c("*")) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  ylab("IL-8 (pg/mL)") + xlab("Fever")
+p
+#dev.off()
+
+p <- ggplot(pdata, aes(x=Fever, y=IL8)) + geom_boxplot(outlier.shape=NA, outlier.size=NA) + geom_jitter(width=0.1, alpha=0.8, height=0) + 
+  ylab("IL8 (pg/mL)") + 
+  annotate('segment', x=1, xend=2, y=12500, yend=12500) + 
+  annotate('text', x=1.5, y=12650, label=c("*")) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  ylab("IL-8 (pg/mL)") + xlab("Fever") +
+  facet_grid(.~Rep)
+p
+
+#pdf(width=4, height=4, "/Users/khuus/ownCloud/KH-Postdoc/µHeat/OrganoidExperiments/18h_IL8_bothreps_byrep.pdf")
+p <- ggplot(pdata, aes(x=Fever, y=IL8, shape=Rep)) + geom_boxplot(outlier.shape=NA, outlier.size=NA) + geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0))
+p <- p + ylab("IL8 (pg/mL)")
+p
+#dev.off()
+
+#plot both timepoints together.
+il8_4h_all$Time <- c("4h")
+il8_18h_all$Time <- c("18h")
+pdata <- full_join(il8_4h_all, il8_18h_all)
+pdata <- pdata %>% filter(FeverFlagellin %in% c("Hi", "Lo"))
+pdata$Fever <- factor(pdata$FeverFlagellin, levels=c("Lo", "Hi"))
+pdata$Time <- factor(pdata$Time, levels=c("4h", "18h"))
+
+#pdf(width=4.5, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/4A.IL8.4h18h.pdf")
+p <- ggplot(pdata, aes(x=Fever, y=IL8)) + geom_boxplot(outlier.shape=NA, outlier.size=NA) + geom_jitter(width=0.1, alpha=0.8, height=0, size=3)
+p <- p + ylab("IL8 (pg/mL)")
+p <- p + annotate('segment', x=1, xend=2, y=12500, yend=12500)
+p <- p + annotate('text', x=1.5, y=12650, label=c("*"))
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + ylab("IL-8 (pg/mL)")
+p <- p + facet_grid(.~Time)
+p
+#dev.off()
+
+#plot controls at both timepoints for supplemental
+pdata1 <- full_join(il8_4h_all, il8_18h_all)
+pdata1 <- pdata1 %>% filter(FeverFlagellin %in% c("Blank", "FliC"))
+pdata1$Time <- factor(pdata1$Time, levels=c("4h", "18h"))
+
+p <- ggplot(pdata1, aes(x=FeverFlagellin, y=IL8)) + geom_boxplot(outlier.shape=NA, outlier.size=NA) + geom_jitter(width=0.1, alpha=0.8, height=0, size=3)
+p <- p + ylab("IL8 (pg/mL)")
+#p <- p + annotate('segment', x=1, xend=2, y=12500, yend=12500)
+#p <- p + annotate('text', x=1.5, y=12650, label=c("*"))
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + ylab("IL-8 (pg/mL)") + xlab("Control")
+p <- p + facet_grid(.~Time)
+p
+
+#re-export the organoid data ID's to combine in a supplemental table.
+orga_export <- il8_4h_all %>% dplyr::select(SampleID, IL8)
+orga_export$Participant_ID <- gsub("H", "HEAT_", orga_export$SampleID)
+#write.csv(orga_export, "/ebio/abt3_projects2/uHEAT/data/SupplementalTables/S#_cellculture.csv")
+
+```
+
+```{r rnaseq import}
+#Process the samples similarly to Alex using his script (edgeR) - or myself DESeq2?
+work.dir = "/ebio/abt3_projects2/uHEAT/data/Organoid_RNAseq"
+out.dir = "/ebio/abt3_projects2/uHEAT/data/Organoid_RNAseq/edgeR"
+#collect files
+# Reading files
+files = list.files(path = file.path(work.dir, "star/STAR_out"),
+                   pattern = "ReadsPerGene.out.tab", recursive = T, include.dirs = T, full.names = T)
+files
+sample_names <- sapply(strsplit(files,"STAR_out/"), `[`, 2)
+sample_names <- gsub("ReadsPerGene.out.tab", "", sample_names)
+#add Participant ID and sample ID / rep info
+samples <- data.frame(Sample=sample_names)
+samples$Participant_ID <- sapply(strsplit(samples$Sample,"_"), `[`, 1)
+samples$Participant_ID <- gsub("H", "HEAT_", samples$Participant_ID)
+samples$Technical_rep <- sapply(strsplit(samples$Sample,"_"), `[`, 2)
+head(samples)
+
+#df <- data.frame(File=files, SampleID=sample_names)
+#head(df)
+
+#can add metadata here.
+meta <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/metadata_organoids_rep1rep2_combined.csv")
+meta <- meta %>% dplyr::select(-c(Sample, SampleID.x, SampleID.y, X.1, X)) %>% 
+  filter(!duplicated(Participant_ID)) %>%
+  full_join(samples, by="Participant_ID") %>% 
+  filter(!is.na(Sample)&!duplicated(Sample))
+meta %>% dplyr::select(Sample, Pair, fever7d_aboveavg)
+meta$FeverFlagellin <- meta$fever7d_aboveavg
+meta$Ctrls <- ifelse(is.na(meta$fever7d_aboveavg), yes=meta$Sample, no=NA)
+meta$Ctrls <- sapply(strsplit(meta$Ctrls,"_"), `[`, 2)
+meta$Ctrls <- ifelse(meta$Ctrls %in% c("p88", "PBS"), 
+                              yes="Neg_ctrl", no=meta$Ctrls)
+meta$FeverFlagellin <- ifelse(is.na(meta$FeverFlagellin), yes=meta$Ctrls, no=meta$FeverFlagellin)
+meta$FeverFlagellin
+meta <- meta[order(meta$Sample),]
+meta$SampleID <- sapply(strsplit(meta$Sample,"_"), `[`, 1)
+#meta$SampleID <- ifelse(meta$SampleID %in% c("Rep1", "Rep2", "REP2"),
+#                        yes=sapply(strsplit(meta$Sample,"_"), `[`, 2),
+#                                   no=meta$SampleID)
+meta$SampleID <- ifelse(meta$SampleID %in% c("Rep1", "Rep2", "REP2"),
+                        yes=meta$Sample, no=meta$SampleID) #to keep each FliC rep separate 
+
+#function for reading and merging text files containing gene expression counts
+DGE.obj <- readDGE(files, labels=sample_names)
+DGE.obj$samples
+DGE.obj$counts
+
+```
+
+```{r rnaseq qc and clean}
+
+# Delete unnecessary read count rows
+hk <- DGE.obj$counts[!(rownames(DGE.obj$counts) %in% c('N_multimapping', 'N_noFeature',
+                                                      'N_ambiguous', 'N_unmapped')),]
+#and re-calculate lib sizes
+DGE.obj$samples$lib.size <- colSums(hk)
+DGE.obj$counts <- DGE.obj$counts[!(rownames(DGE.obj$counts) %in% c('N_multimapping', 'N_noFeature',
+                                                       'N_ambiguous', 'N_unmapped')),]
+
+###Summarize by technical replicates.
+identical(colnames(DGE.obj), meta$Sample) #TRUE
+matrix.tmp <- DGE.obj$counts
+colnames(matrix.tmp) = meta$SampleID
+matrix.sum <- sumTechReps(matrix.tmp, ID=colnames(matrix.tmp)) 
+DGE.obj.sum <- DGEList(matrix.sum) #oh and then I can reconvert it, okay cool.
+DGE.obj.sum
+
+# Libraries sizes plot
+par(mar = c(8, 5, 2, 0))
+barplot(DGE.obj$samples$lib.size*1e-6, names=rownames(DGE.obj$samples), 
+        ylab="Library size (millions)", 
+        #xlab="Samples",
+        las=2)
+
+barplot(DGE.obj.sum$samples$lib.size*1e-6, names=rownames(DGE.obj.sum$samples), 
+        ylab="Library size (millions)", 
+        #xlab="Samples",
+        las=2)
+
+#need to define the design here in order to filter correctly.
+#add metadata for grouping.
+meta_notech <- meta %>% filter(Technical_rep!=2)
+#double check, I am not convinced this is joining correctly! #though inner join should match
+identical(colnames(DGE.obj.sum), meta_notech$SampleID) 
+#instead of excluding groups here, exclude them later. merge the fever info
+DGE.obj.sum$group = tibble(Sample = samples$Sample) %>% 
+  inner_join(meta_notech) %>% 
+  pull(FeverFlagellin) 
+check <- data.frame(Sample=row.names(DGE.obj.sum$samples), Fever=DGE.obj.sum$group)
+identical(check$Sample, meta_notech$SampleID) #seems fine
+identical(check$Fever, meta_notech$FeverFlagellin) #seems fine
+
+##*Define the design of the experiment## #note - this affects filtering
+#start with the controls only as a test case.
+group <- DGE.obj.sum$group
+group <- factor(group)
+str(group)
+data.frame(row.names(DGE.obj.sum$samples), group) #check
+DGE.obj.sum$samples$group <- DGE.obj.sum$samplesgroup_ctrls
+
+my_design <- model.matrix(~0+group, data=DGE.obj.sum$samples)
+colnames(my_design) <- levels(group)
+my_design
+
+#Filter: discard poorly-expressed genes
+keep <- filterByExpr(DGE.obj.sum, design = my_design)
+table(keep)
+
+DGE.obj.k <- DGE.obj.sum[keep, keep.lib.sizes=FALSE]
+
+# Normalization w/factor calculation 
+DGE.obj.n <- calcNormFactors(DGE.obj.k, method="TMM")
+DGE.obj.n
+
+```
+
+```{r rnaseq annotate}
+#add gene annotations from human genome #to the normalized/filtered table.
+geneid <- rownames(DGE.obj.n$counts)
+length(geneid)
+mart38 <- useMart(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+mart38
+f <- listFilters(mart38)
+atr <- listAttributes(mart38)
+resBM <- biomaRt::getBM(attributes = c('ensembl_gene_id', 
+                                       'external_gene_name',
+                                       'entrezgene_id',
+                                       'description', 'gene_biotype'),
+                        filters = 'ensembl_gene_id', 
+                        values = geneid,
+                        mart = mart38,
+                        useCache = FALSE)
+
+
+# find ambiguous genes (duplicated annotations)
+resgenes <- as.data.table(resBM)
+non.unique <- resgenes[, .N, by=entrezgene_id][N>=2]$entrezgene_id
+non.unique.2 <- resgenes[, .N, by=ensembl_gene_id][N>=2]$ensembl_gene_id
+# to be removed
+non.unique
+non.unique.2
+# remove them.
+ids.good <- resgenes[!is.na(resgenes$entrezgene_id) & 
+                  !(entrezgene_id %in% non.unique) & 
+                  !(ensembl_gene_id %in% non.unique.2)]$ensembl_gene_id
+genes <- resgenes[ensembl_gene_id %in% ids.good,]$entrezgene_id
+names(genes) <- resgenes[ensembl_gene_id %in% ids.good,]$ensembl_gene_id
+length(genes)
+
+#make an annotated DGE object
+DGE.obj.entrez <- copy(DGE.obj.n) #Alex did it from the normalized table
+DGE.obj.entrez$counts <- DGE.obj.entrez$counts[rownames(DGE.obj.entrez$counts) %in% names(genes), ]
+#Change ensembl names to entrez names
+rownames(DGE.obj.entrez$counts) <- genes[rownames(DGE.obj.entrez$counts)]
+DGE.obj.entrez$counts
+
+entrez.descr <- resgenes[, c("external_gene_name", "entrezgene_id", "description", "gene_biotype", "ensembl_gene_id")]
+entrez.descr$entrezgene_id <- as.character(entrez.descr$entrezgene_id)
+entrez.descr
+entrez.descr %>% filter(external_gene_name == "TLR5") #for example.
+
+```
+
+```{r rnaseq test}
+#Prepare design matrix for testing
+DGE.obj.entrez$group
+contr.matrix <- makeContrasts(
+  hi_vs_lo = hi - lo,
+  p15_vs_ctrl = p15 - Neg_ctrl,
+  FliC_vs_ctrl = FliC - Neg_ctrl,
+  FliC_vs_p15 = FliC - p15,
+  levels = colnames(my_design))
+contr.matrix
+
+#make logCPM to export for the whole table.
+y = DGE.obj.entrez
+logCPM <- cpm(y, prior.count=1, log=TRUE) #cpm with log2
+
+# rename the genes from Ensembl IDs to normal names (external_gene_name)
+ggg <- resgenes[ensembl_gene_id %in% ids.good,]$external_gene_name
+names(ggg) <- resgenes[ensembl_gene_id %in% ids.good,]$entrezgene_id
+rownames(logCPM) <- ggg[rownames(logCPM)]
+logCPM
+
+#write.table(logCPM, file.path(out.dir, "all_logCPM.txt"), 
+#            row.names = T, quote = F, sep = '\t')
+
+#test ctrls
+curr_contrast <- c("FliC_vs_ctrl") #start with control
+
+#Calculate Dispersion (common and by genes)
+ydisp <- estimateDisp(y, my_design, robust=TRUE)
+plotBCV(ydisp)   
+#Fit GLM
+fit <- glmFit(ydisp, my_design)
+
+#Make a likelihood ratio test
+lrt <- glmLRT(fit, contrast = contr.matrix[, curr_contrast])
+topTags(lrt)
+summary(decideTests(lrt, adjust.method = 'fdr', p.value=0.05)) #ah. that makes more sense.
+
+#individual counts-per-million for the top genes
+res_flic <- as.data.frame(lrt$table[order(lrt$table$PValue),])
+res_flic$FDR <- p.adjust(res_flic$PValue, 'fdr')
+res_flic$entrezgene_id <- row.names(res_flic) #the row names are entrez gene ids
+# Add gene annotation and make a table for GSEA
+res_flic <- res_flic %>% full_join(entrez.descr)
+logFC_flic <- data.frame(ids=res_flic$external_gene_name, scores=res_flic$logFC) #keep all results for GSEA analysis
+logFC_flic <- logFC_flic[order(logFC_flic$scores),]
+names(logFC_flic) <- NULL
+head(logFC_flic)
+res_flic_sig <- res_flic %>% filter(FDR<0.05)
+res_flic_sig
+#export
+#write.table(res_flic_sig, file.path(out.dir, paste0(curr_contrast, '_hits.txt')), 
+#            row.names = F, quote = F, sep = '\t')
+#export all, e.g. for volcano plot
+#write.table(res_flic, file.path(out.dir, paste0(curr_contrast, '_all.txt')), 
+#            row.names = F, quote = F, sep = '\t')
+
+
+#repeat here for fever hi vs fever lo. :)
+curr_contrast <- c("hi_vs_lo")
+
+#Make a likelihood ratio test
+lrt <- glmLRT(fit, contrast = contr.matrix[, curr_contrast])
+topTags(lrt)
+summary(decideTests(lrt, adjust.method = 'fdr', p.value=0.05)) 
+
+#individual counts-per-million for the top genes
+res_fever <- as.data.frame(lrt$table[order(lrt$table$PValue),])
+res_fever$FDR <- p.adjust(res_fever$PValue, 'fdr')
+res_fever$entrezgene_id <- row.names(res_fever) #the row names are entrez gene ids
+# Add gene annotation and make a FC table for GSEA
+res_fever <- res_fever %>% full_join(entrez.descr)
+logFC_hilo <- data.frame(ids=res_fever$external_gene_name, scores=res_fever$logFC) #keep all results for GSEA analysis
+logFC_hilo <- logFC_hilo[order(logFC_hilo$scores),]
+names(logFC_hilo) <- NULL
+head(logFC_hilo)
+#and export significant results
+res_fever_sig <- res_fever %>% filter(PValue<0.05) #take the raw values just to check.
+res_fever_sig
+#write.table(res_fever_sig, file.path(out.dir, paste0(curr_contrast, '_hits.txt')), 
+#            row.names = F, quote = F, sep = '\t')
+#export all, e.g. for volcano plot
+#write.table(res_fever, file.path(out.dir, paste0(curr_contrast, '_all.txt')), 
+#            row.names = F, quote = F, sep = '\t')
+
+#what is the overlap between flagellin hits and fever hits?
+FliC_vs_Ctrl_up <- res_flic_sig %>% filter(logFC>0) #qval corrected
+hi_vs_lo_up <- res_fever_sig %>% filter(logFC>0) #only pval corrected
+length(FliC_vs_Ctrl_up$external_gene_name) #223 hits
+length(hi_vs_lo_up$external_gene_name) #139 hits that don't pass FDR
+flagellin_fever_genes <- intersect(FliC_vs_Ctrl_up$external_gene_name, hi_vs_lo_up$external_gene_name)
+flagellin_fever_genes <- hi_vs_lo_up %>% filter(external_gene_name %in% flagellin_fever_genes) %>% 
+  dplyr::select(c(external_gene_name, description))
+flagellin_fever_genes #includes NFKB and plenty of classic inflammation genes; and IL32
+#write.table(flagellin_fever_genes, paste0(out.dir, '/flagellin_fever_genes_overlap.txt'),
+#            row.names = F, quote = F, sep = '\t')
+
+dim(flagellin_fever_genes) #78 overlap
+length(flagellin_fever_genes$external_gene_name)/length(hi_vs_lo_up$external_gene_name)*100  #so more than half overlap with FliC FDR correction
+
+```
+
+```{r rnaseq volcano plots}
+#make a volcano plot of FliC vs ctrl
+mycolours <- c("blue", "red", "grey")
+names(mycolours) <- c("DOWN", "UP", "NO")
+res_flic$diffexpressed <- c("NO")
+res_flic$diffexpressed[res_flic$logFC > 0 & res_flic$FDR<0.05] <- c("UP")
+res_flic$diffexpressed[res_flic$logFC < 0 & res_flic$FDR<0.05] <- c("DOWN")
+
+# Now write down the name of genes beside the points...
+# Create a new column "delabel" to de, that will contain the name of genes differentially expressed (N
+res_flic$delabel <- ifelse(res_flic$diffexpressed!="NO",
+                          yes=res_flic$external_gene_name, no=NA)
+
+#pdf(width=6, height=5, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S11#_OrgaFliCctrl.pdf")
+p = ggplot(data=res_flic, aes(x=logFC, y=-log10(PValue), 
+                              col=diffexpressed, 
+                              label=delabel)) + 
+  ggtitle("FliC vs Ctrl") +
+  scale_colour_manual(values = mycolours) + 
+  geom_point(alpha=0.5) + 
+  theme_bw() +
+  guides(fill = guide_legend(override.aes = aes(label = ""))) + 
+  geom_text_repel(size=2,  max.overlaps = 30, segment.size=0.2, show.legend = FALSE)
+#    geom_text(size=2)
+p
+#dev.off()
+
+#repeat for hi vs lo - label the top ones or the FliC ones
+res_fever$diffexpressed <- c("NO")
+res_fever$diffexpressed[res_fever$logFC > 1 ] <- c("UP")
+res_fever$diffexpressed[res_fever$logFC < -1 ] <- c("DOWN")
+res_fever$delabel <- ifelse(res_fever$diffexpressed!="NO"|res_fever$PValue<0.001,
+                           yes=res_fever$external_gene_name, no=NA)
+res_fever$diffexpressed <- c("NO")
+#label or colour the ones that overlap with FliC
+res_fever$FliC <- ifelse(res_fever$external_gene_name %in% FliC_vs_Ctrl_up$external_gene_name,
+                         yes="FliC", no=NA)
+
+#pdf(width=6, height=5, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S11C_OrgaFeverRNA_volcano_vsFliC.pdf")
+p = ggplot(data=res_fever, aes(x=logFC, y=-log10(PValue), 
+                              col=FliC, 
+                              label=delabel)) + 
+  ggtitle("Fever Hi vs Lo") +
+  scale_colour_manual(values = c('firebrick3', 'black'), labels=c("yes", "no")) + 
+  geom_point(alpha=0.5) + 
+  theme_bw() +
+  guides(fill = guide_legend(override.aes = aes(label = ""))) + 
+  labs(colour=c("Up in FliC")) +
+  geom_text_repel(size=2,  max.overlaps = 30, segment.size=0.2, show.legend = FALSE)
+p
+#dev.off()
+
+
+
+```
+
+```{r rnaseq gsea plot}
+#website WebGestalt was used on the fold changes list of feverhi vs feverlo
+#type of analysis: GSEA
+#database: pathway Reactome
+
+gsea_res <- read.delim("/ebio/abt3_projects2/uHEAT/data/Organoid_RNAseq/gsea/enrichment_results_wg_result1720512139.txt")
+gsea_res
+gsea_res$Sig <- ifelse(gsea_res$FDR<0.05, "yes", "no")
+
+pdata <- gsea_res %>% filter(Sig=="yes")
+pdata$description <- factor(pdata$description, levels=c(pdata[order(pdata$normalizedEnrichmentScore),]$description))
+summary(pdata$normalizedEnrichmentScore)
+
+#summary plot of gsea results
+#pdf(width=5, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/4B.GSEA2.pdf")
+p <- ggplot(pdata, aes(x=normalizedEnrichmentScore, y=description, fill=FDR)) + geom_bar(stat='identity', colour='black') + 
+  scale_fill_gradient(low="aliceblue", high="deepskyblue3") + 
+  theme_bw() + ylab(NULL) + labs(fill="qval") + ggtitle("Fever-hi vs lo") +
+  xlab("Enrichment Score") +
+  scale_x_continuous(limits=c(0, 2.5), breaks=c(0, 1, 2)) 
+p
+#dev.off()
+
+#reexport the sig hits for a supplemental table
+#write.csv(pdata, "/ebio/abt3_projects2/uHEAT/data/SupplementalTables/TableS#_Fig5B.csv")
+
+#also do a GSEA result for FliC vs. ctrl. (?)
+
+```
+
+```{r select samples for rep 3}
+#double check that the samples I selected are NOT in previous rounds #updated with visual fever selection Nov 13
+new_rep <- read.csv("/ebio/abt3_projects2/uHEAT/data/Organoid_RNAseq/25.11.OrganoidRevisionsRepList.csv")
+#meta imported as above for rnaseq
+#can add metadata here.
+meta <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/metadata_organoids_rep1rep2_combined.csv")
+meta <- meta %>% dplyr::select(-c(Sample, SampleID.x, SampleID.y, X.1, X)) %>% 
+  filter(!duplicated(Participant_ID)) %>%
+  full_join(samples, by="Participant_ID") %>% 
+  filter(!is.na(Sample)&!duplicated(Sample))
+meta %>% dplyr::select(Sample, Pair, fever7d_aboveavg)
+meta$FeverFlagellin <- meta$fever7d_aboveavg
+meta$Ctrls <- ifelse(is.na(meta$fever7d_aboveavg), yes=meta$Sample, no=NA)
+meta$Ctrls <- sapply(strsplit(meta$Ctrls,"_"), `[`, 2)
+meta$Ctrls <- ifelse(meta$Ctrls %in% c("p88", "PBS"), 
+                              yes="Neg_ctrl", no=meta$Ctrls)
+meta$FeverFlagellin <- ifelse(is.na(meta$FeverFlagellin), yes=meta$Ctrls, no=meta$FeverFlagellin)
+meta$FeverFlagellin
+meta <- meta[order(meta$Sample),]
+meta$SampleID <- sapply(strsplit(meta$Sample,"_"), `[`, 1)
+#meta$SampleID <- ifelse(meta$SampleID %in% c("Rep1", "Rep2", "REP2"),
+#                        yes=sapply(strsplit(meta$Sample,"_"), `[`, 2),
+#                                   no=meta$SampleID)
+meta$SampleID <- ifelse(meta$SampleID %in% c("Rep1", "Rep2", "REP2"),
+                        yes=meta$Sample, no=meta$SampleID) #to keep each FliC rep separate 
+
+
+new_rep$Participant_ID %in% meta$Participant_ID #none of them are in the metadata file
+
+#check #2 
+il8_18h_all <- read.csv("/ebio/abt3_projects2/uHEAT/data/Organoid_RNAseq/cytokines/IL8_18h_bothreps.csv", row.names=1)
+new_rep$Participant_ID %in% gsub("H", "HEAT_", il8_18h_all$SampleID)
+
+#ok none of them have been used before.
+
+#now: let's check how this selection compares in terms of even distribution of phenotypes, etc.
+new_rep$Rep <- c("Rep3")
+meta_rep12 <- meta %>% dplyr::select(Participant_ID, Rep) %>%
+  filter(!duplicated(Participant_ID))#keep it simple
+#H019 is rep 1, I don't know why that's missing
+meta_rep12[which(meta_rep12$Participant_ID=="HEAT_019"),]$Rep <- c("Rep1")
+meta_orga_all <- full_join(new_rep, meta_rep12) %>% 
+    full_join(meta_seq) %>% #add the actual metadata to all
+  filter(!is.na(Rep)&!duplicated(Participant_ID))
+dim(meta_orga_all) #n=54 ; 30 in reps 1-2, 24 in theoretical rep 3
+#maybe it should also be n=30 in rep 3 ? double the N? (N would then =30 per group)
+
+dplyr::count(meta_orga_all, Rep)
+dplyr::count(meta_orga_all, fever7d_aboveavg) #n=27 fever-high, 27 fever-low
+meta_orga_all$fever7d_aboveavg <- factor(meta_orga_all$fever7d_aboveavg, levels=c("lo", "hi"))
+#plot the distribution of fevers as per Fig 1B
+p <- ggplot(meta_orga_all, aes(x=fever7d, fill=fever7d_aboveavg)) + geom_density(alpha=0.5) +
+  theme_minimal() +
+  scale_fill_manual(values=c("grey50", "firebrick3")) +
+  xlab("∆T (ºC)") + ylab("Density") + labs(fill="Fever")
+p
+#versus a boxplot because the hist shows overlap which doesn't exist
+p <- ggplot(meta_orga_all, aes(x=fever7d_aboveavg, y=fever7d)) + geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, aes(colour=Rep)) +
+  annotate('segment', x=0.5, xend=2.5, y=0.78, yend=0.78, linetype='dashed')
+p
+
+meta_orga_all_hi <- meta_orga_all %>% filter(fever7d_aboveavg=="hi")
+meta_orga_all_lo <- meta_orga_all %>% filter(fever7d_aboveavg=="lo")
+
+#average fever per group
+summary(meta_orga_all_hi$fever7d) #0.8-2.4, mean 1.5 #N=30 : mean 1.4
+summary(meta_orga_all_lo$fever7d) #0.25-0.7, mean 0.4 #N=30 : mean 0.4
+
+#demographics as per Table S1 (01.Metadata.Rmd)
+#age #use meta (full meta) for comparison
+#updated: this version also excludes SERIES 2 of all double series.
+meta_seq <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/meta_seq_clean_series1.24.08.18.csv", 
+                     row.names=1)
+length(meta_seq$SampleID) #final number of fecal samples
+
+
+#per-person metadata, matching
+meta <- meta_seq %>% filter(!duplicated(Participant_ID)&!is.na(fever7d_aboveavg)) %>%
+  dplyr::select(-c(SampleID, Relative_Day, Time0, Time01))
+length(meta$Participant_ID) #final number of participants
+
+#define DIET 3
+meta$Diet3 <- ifelse(meta$Diet %in% c("Vegan", "Vegetarian"), yes="Veg", no="Omni")
+meta_seq$Diet3 <- ifelse(meta_seq$Diet %in% c("Vegan", "Vegetarian"), yes="Veg", no="Omni")
+
+meta_hi <- meta %>% filter(fever7d_aboveavg=="hi")
+meta_lo <- meta %>% filter(fever7d_aboveavg=="lo")
+meta_hi %>% dplyr::summarize(median(Age)) #25
+meta_lo %>% dplyr::summarize(median(Age)) #25
+meta_orga_all_hi %>% dplyr::summarize(median(Age)) #26 #N=30 ; 25.5
+meta_orga_all_lo %>% dplyr::summarize(median(Age)) #24 #N=30 ; 25
+#so in the last rep ; maybe try and even this slightly
+
+#gender
+count(meta, Sex) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #64% F
+count(meta_hi, Sex) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #58% F
+count(meta_lo, Sex) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #67% F
+
+count(meta_orga_all_hi, Sex) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #55% F #N=30 60% F
+count(meta_orga_all_lo, Sex) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #55% F #N=30 60% F
+
+#diet
+count(meta, Diet3) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) #n=46 veg (27%)
+count(meta_hi, Diet3) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #18% veg
+count(meta_lo, Diet3) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #33% veg
+
+count(meta_orga_all_hi, Diet3) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #26% Veg #N=30 23%
+count(meta_orga_all_lo, Diet3) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #44% veg #N=30 50%
+#is the 'ratio' of Veg/Omni kind of the same?
+50/23 #2x as many veg as omni in fever-low in the organoid selection #so the ratio is a bit more skewed
+33/18 #similarly 1.8x as many veg as omni in the full metadata
+
+#which dose?
+count(meta_hi, Vaccine_StudyDose) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #85% dose 3 
+count(meta_lo, Vaccine_StudyDose) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #82% dose 3 
+
+count(meta_orga_all_hi, Vaccine_StudyDose) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #85% dose 3 #N=30 84%
+count(meta_orga_all_lo, Vaccine_StudyDose) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #92% dose 3 (but it's only actually a difference of 2 ppl) #N=30 81%
+
+#which type of vaccine?
+count(meta_hi, StudyVaccine_Type) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #90% BNT
+count(meta_lo, StudyVaccine_Type) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #93% BNT
+
+count(meta_orga_all_hi, StudyVaccine_Type) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #85% BNT #N=30 86%
+count(meta_orga_all_lo, StudyVaccine_Type) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #88% BNT #N=30 86% #or 93%
+
+
+#vaccine history
+count(meta_hi, Vaccines_all) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #50% 3BNT
+count(meta_lo, Vaccines_all) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #50% 3BNT
+
+count(meta_orga_all_hi, Vaccines_all) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #55% 3BNT #53%
+count(meta_orga_all_lo, Vaccines_all) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #48% 3BNT #46% or 53% (better!)
+
+#previous fever
+count(meta_hi, LastFeverAny) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #85% y
+count(meta_lo, LastFeverAny) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #62% y
+
+count(meta_orga_all_hi, LastFeverAny) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #96% y #96%
+count(meta_orga_all_lo, LastFeverAny) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) %>% as.data.frame() #70% y #63%
+
+##checking sample selection of the entire dataset vs. my visual definition of fever (temperature plots)
+all_samples_visual <- read.csv("/ebio/abt3_projects2/uHEAT/data/Organoid_RNAseq/Organoid_Participants_All_vs_VisualFever.csv")
+all_samples_visual$Participant_ID <- gsub("_7", "", all_samples_visual$Participant_ID, fixed=TRUE)
+all_samples_visual$Participant_ID <- gsub("_14", "", all_samples_visual$Participant_ID, fixed=TRUE)
+
+all_samples_visual <- full_join(all_samples_visual, meta) %>% filter(!is.na(Rep))
+all_samples_visual %>% dplyr::select(Participant_ID, Visual.Fever, If.fever..convincing., fever7d, fever7d_aboveavg) %>%
+  as.data.frame()
+all_samples_visual$visual_fever_hilo <- gsub("yes", "hi", all_samples_visual$Visual.Fever)
+all_samples_visual$visual_fever_hilo <- gsub("n", "lo", all_samples_visual$visual_fever_hilo)
+all_samples_visual$FeverMatch <- all_samples_visual$visual_fever_hilo==all_samples_visual$fever7d_aboveavg
+all_samples_visual %>% filter(FeverMatch==FALSE) %>% 
+  dplyr::select(Participant_ID, Visual.Fever, If.fever..convincing., fever7d, fever7d_aboveavg, FeverMatch, Rep) %>%
+  as.data.frame() %>% View()
+
+#hmm, if I highlight the 4 "troublemaker" samples in Rep2, are they incongruant? 
+trouble <- c("HEAT_014", "HEAT_020", "HEAT_038", "HEAT_043")
+
+all_samples_visual %>% filter(Participant_ID=="HEAT_021") %>% 
+  dplyr::select(Participant_ID, Visual.Fever, If.fever..convincing., fever7d, fever7d_aboveavg, FeverMatch, Rep) %>%
+  as.data.frame() %>% View()
+
+
+```
+
+```{r orga rep3 cytokines 4h TIDY CODE}
+il8_orga3 <- read.csv("/ebio/abt3_projects2/uHEAT/data/Organoid_RNAseq/Orga_Rep3_IL8_Calpro_forR.csv") #cytokines for rep3
+
+#1st quick check based on 4h suspicion. Is there a plate effect? how different are time points? Look at fecal samples only.
+il8_orga3h <- il8_orga3[grep("HEAT", il8_orga3$Sample),]
+p <- ggplot(il8_orga3h, aes(x=as.factor(Plate), y=IL8.pg.mL_18h)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0)
+p #maybe a small one at 18h?
+summary(aov(IL8.pg.mL_18h~as.factor(Plate), data=il8_orga3h)) #p=0.071
+p <- ggplot(il8_orga3h, aes(x=as.factor(Plate), y=IL8.pg.mL_4h)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0)
+p #and then a very dramatic one at 4h in my opinion
+summary(aov(IL8.pg.mL_4h~as.factor(Plate), data=il8_orga3h)) #yes, p=0.002
+
+#what about rep 2, was there also a plate effect? should check. (go back above)
+
+#add metadata
+il8_orga3_meta <- il8_orga3 %>% rename(Participant_ID=Sample) %>%
+  full_join(meta) 
+
+pdata <- il8_orga3_meta %>% filter(!is.na(Age)) %>% #exclude the controls
+  filter(!is.na(IL8.pg.mL_4h)) #and the samples not included
+
+#together with the first 2 reps
+il8_4h_all <- read.csv("/ebio/abt3_projects2/uHEAT/data/Organoid_RNAseq/cytokines/IL8_4h_bothreps.csv", row.names=1)
+il8_4h_all$Participant_ID <- gsub("H", "HEAT_", il8_4h_all$SampleID)
+il8_orga3$Participant_ID <- il8_orga3$Sample
+il8_orga3$Rep <- c("Rep3")
+il8_orga3_4h <- il8_orga3 %>% dplyr::select(-c(IL8.pg.mL_18h, Calpro.pg.mL)) %>% rename(IL8.pg.mL=IL8.pg.mL_4h)
+
+il8_all_4h <- il8_4h_all %>% filter(FeverFlagellin %in% c("Hi", "Lo")) %>%
+  dplyr::select(Participant_ID, IL8, Rep, Plate) %>%
+  rename(IL8.pg.mL=IL8) %>%
+  full_join(il8_orga3_4h) %>%
+  dplyr::select(Participant_ID, IL8.pg.mL, Rep, Plate) %>%
+  full_join(meta) %>%
+  filter(!is.na(Age)) %>%
+  filter(!is.na(IL8.pg.mL))
+
+dim(il8_all_4h) #60 samples
+il8_all_4h$fever7d_aboveavg <- factor(il8_all_4h$fever7d_aboveavg, levels=c("lo", "hi"))
+il8_all_4h$Rep.Plate <- paste(il8_all_4h$Rep, il8_all_4h$Plate, sep=".")
+
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/5A.IL8.18h.pdf")
+p <- ggplot(il8_all_4h, aes(x=fever7d_aboveavg, y=IL8.pg.mL)) + geom_boxplot(outlier.shape=NA, outlier.size=NA) + geom_jitter(width=0.1, alpha=0.8, height=0) + 
+  ylab("IL8 (pg/mL)") + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  ylab("IL-8 (pg/mL)") + xlab("Fever") + 
+  facet_grid(.~Rep)
+p
+#dev.off()
+
+#well it actually is a little bit better at 4h
+p <- ggplot(il8_all_4h, aes(x=fever7d_aboveavg, y=IL8.pg.mL)) + geom_boxplot(outlier.shape=NA, outlier.size=NA) + geom_jitter(width=0.1, alpha=0.8, height=0) + 
+  ylab("IL8 (pg/mL)") + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  ylab("IL-8 (pg/mL)") + xlab("Fever") 
+p
+wilcox.test(il8_all_4h$IL8.pg.mL~il8_all_4h$fever7d_aboveavg) #p=0.13 #so it's not great but it looks better for sure
+
+#does the data make sense in light of TLR5 or flagellin antibodies
+#tlr and elisa data
+tlr_elisa <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/ELISA_TLR_all.csv", row.names=1)
+head(tlr_elisa)
+
+pdata2 <- il8_all_4h %>% full_join(tlr_elisa) %>%
+  filter(!is.na(IL8.pg.mL))
+
+#TLR5 vs. IL8 #the scales are quite different but on log it's fairly convincing actually, yes 
+#pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S11B_TLR5_vs_IL8.pdf")
+p <- ggplot(pdata2, aes(x=log(IL8.pg.mL), y=log(TLR5))) + geom_point() +
+  geom_smooth(method='lm')  +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = "black")) +
+  annotate('text', x=4.5, y=1.5, label=c("p=1.4e-06\nrho=0.58"), hjust=0) +
+  ylab("Fecal Flagellin (log ng/mL)") + xlab("Organoid IL-8 (log pg/mL)")
+p #no TLR4 or TLR2 association though
+#dev.off()
+cor.test(pdata2$IL8.pg.mL, pdata2$TLR5, method='spearman') #very significant, rho=0.58 (so slightly better at 4h than 18h)
+dim(pdata2) #n=60, just checking.
+
+#also control for bss for that specific samples #these are all stool 7
+bss <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/22-06-BSS-Metadata-clean1-forR-doublechecked-June2022.csv")
+bss <- bss %>% filter(Stool_ID==7)
+orgaIL8_bss <- il8_all_4h %>% dplyr::select(-c(Stool_ID, Bristol_Stool_Score, Comment, Date, Time)) %>%
+  full_join(bss) %>% filter(!is.na(IL8.pg.mL)&!is.na(Age))
+
+#test by linear model correcting for technical variation (batch, BSS)
+m7 <- lme(IL8.pg.mL ~ as.numeric(Bristol_Stool_Score) + fever7d_aboveavg, random=~1|Rep.Plate, data=orgaIL8_bss)
+summary(m7) #p=0.0315
+
+#Plot adjusted 2: residuals #FIXED: this is now the correct way to do it.
+orgaIL8_bss$Bristol_Stool_Score <- as.numeric(orgaIL8_bss$Bristol_Stool_Score)
+mtech_orga <- lme(IL8.pg.mL ~ Bristol_Stool_Score, random=~1|Rep.Plate, data=orgaIL8_bss)
+summary(mtech_orga)
+orgaIL8_bss$fever7d_01 <- ifelse(orgaIL8_bss$fever7d_aboveavg=="lo", yes=0, no=1)
+orgaIL8_bss %>% dplyr::select(fever7d_aboveavg, fever7d_01) #ok
+orgaIL8_bss$resid_adj <- resid(mtech_orga, type="normalized") +
+                          fixef(mtech_orga)["(Intercept)"]
+orgaIL8_bss$resid_adj
+
+#pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/4A_OrgaIL8_adj.pdf")
+p <- ggplot(orgaIL8_bss, aes(x=fever7d_aboveavg, y=resid_adj)) + 
+  geom_boxplot(outlier.shape=NA, outlier.size=NA) +
+  geom_jitter(width=0.1, height=0) +
+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  xlab("Fever") + ylab("IL-8 Adjusted (pg/mL)") +
+  annotate('segment', x=1, xend=2, y=354, yend=354) +
+  annotate('text', x=1.5, y=354.5, label=c("*"), size=6)
+p
+#dev.off()
+wilcox.test(orgaIL8_bss$resid_adj~orgaIL8_bss$fever7d_aboveavg) #now this gives me a p-value in the expected range. #but I should use the p value from the original LM, this is just for visualization
+
+#vs. plotted by batch.
+p <- ggplot(orgaIL8_bss, aes(x=fever7d_aboveavg, y=resid_adj)) + geom_boxplot(outlier.shape=NA, outlier.size=NA) + 
+  geom_jitter(width=0.1, alpha=0.8, height=0, aes(colour=as.factor(Bristol_Stool_Score), shape=Sex)) + 
+  ylab("IL8 (pg/mL)") + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  ylab("IL-8 (pg/mL)") + xlab("Fever") + 
+  facet_grid(.~Rep)
+p
+#rep 3 is still less impressive. 
+
+#pdf(width=5, height=4, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/0_OrganoidIL8Adj_byBatch.pdf")
+p <- ggplot(orgaIL8_bss, aes(x=fever7d_aboveavg, y=resid_adj)) + geom_boxplot(outlier.shape=NA, outlier.size=NA) + 
+  geom_jitter(width=0.1, alpha=0.8, height=0, aes(colour=as.factor(Bristol_Stool_Score))) + 
+  ylab("IL8 (pg/mL)") + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  ylab("IL-8 Adjusted (pg/mL)") + xlab("Fever") + labs(colour='BSS') +
+  facet_grid(.~Rep)
+p
+#dev.off()
+
+#pdf(width=5, height=4, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/0_OrganoidIL8Raw_byBatch.pdf")
+p <- ggplot(orgaIL8_bss, aes(x=fever7d_aboveavg, y=IL8.pg.mL)) + geom_boxplot(outlier.shape=NA, outlier.size=NA) + 
+  geom_jitter(width=0.1, alpha=0.8, height=0, aes(colour=as.factor(Bristol_Stool_Score))) + 
+  ylab("IL8 (pg/mL)") + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  ylab("IL-8 (pg/mL)") + xlab("Fever") + labs(colour='BSS') +
+  facet_grid(.~Rep)
+p
+#dev.off()
+
+#pdf(width=5, height=4, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/0_OrganoidFever_byBatch.pdf")
+p <- ggplot(orgaIL8_bss, aes(x=fever7d_aboveavg, y=fever7d)) + geom_boxplot(outlier.shape=NA, outlier.size=NA) + 
+  geom_jitter(width=0.1, alpha=0.8, height=0) + 
+  ylab("IL8 (pg/mL)") + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  ylab("Fever (ºC)") + xlab("Fever") + 
+  facet_grid(.~Rep)
+p
+#dev.off()
+
+#I think I already checked linearly by fever. check again.
+cor.test(orgaIL8_bss$fever7d, orgaIL8_bss$resid_adj, method='spearman') #p=0.04, rho=0.26
+p <- ggplot(orgaIL8_bss, aes(x=fever7d, y=resid_adj)) + geom_point() + geom_smooth(method='lm') +
+  facet_grid(.~Rep)
+p
+cor.test(orgaIL8_bss$fever7d, orgaIL8_bss$IL8.pg.mL, method='spearman') #p=0.13
+
+#only in 'firm' stools, i.e., presumably enough biomass
+pdata <- orgaIL8_bss %>% filter(as.numeric(Bristol_Stool_Score)<6)
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=resid_adj)) + geom_boxplot(outlier.shape=NA, outlier.size=NA) + 
+  geom_jitter(width=0.1, alpha=0.8, height=0, aes(colour=as.factor(Bristol_Stool_Score))) + 
+  ylab("IL8 (pg/mL)") + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  ylab("IL-8 (pg/mL)") + xlab("Fever") + 
+  facet_grid(.~Rep)
+p
+
+#is the FEVER difference just worse in rep 3? #well, a little. The high-fevers are a little less high, but not really vs rep2. 
+#but it's true that the fever difference is less striking in the girls, actually. I was forced to pick worse examples as I ran out.
+p <- ggplot(orgaIL8_bss, aes(x=fever7d_aboveavg, y=fever7d)) + 
+  geom_boxplot(outlier.shape=NA, outlier.size=NA) +
+  geom_jitter(width=0.1, height=0) +
+  facet_grid(Sex~Rep)
+p
+
+#hmm, maybe it is a gender thing, after all?
+dplyr::count(orgaIL8_bss, Rep, Sex)
+orgaIL8_bss_m <- orgaIL8_bss %>% filter(Sex=="m")
+orgaIL8_bss_f <- orgaIL8_bss %>% filter(Sex=="f")
+#males
+pb <- ggplot(orgaIL8_bss_m, aes(x=fever7d_aboveavg, y=resid_adj)) + 
+  geom_boxplot() +
+  geom_jitter(width=0.1, height=0) +
+  facet_grid(.~Rep)
+pb
+#females #definitely messier
+pf <- ggplot(orgaIL8_bss_f, aes(x=fever7d_aboveavg, y=resid_adj)) + 
+  geom_boxplot() +
+  geom_jitter(width=0.1, height=0) +
+  facet_grid(.~Rep)
+pf
+#I skipped a lot of good fever examples in male participants to try and keep the gender ratios ok.
+#what if it's a cycling issue that's mixing up the fever measurement because of body temp differences?
+orgaIL8_bss$fixed_hormones <- ifelse(orgaIL8_bss$Sex=="m" | orgaIL8_bss$Sex=="f"&orgaIL8_bss$Hormonal_contraceptive=="y",
+                                     "fixed", "variable")
+orgaIL8_bss_fixed <- orgaIL8_bss %>% filter(fixed_hormones=="fixed")
+orgaIL8_bss_cycle <- orgaIL8_bss %>% filter(fixed_hormones=="variable")
+
+ph <- ggplot(orgaIL8_bss_fixed, aes(x=fever7d_aboveavg, y=resid_adj)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0) +
+  facet_grid(.~Rep)
+ph
+dim(orgaIL8_bss_fixed) #n=31 total
+wilcox.test(orgaIL8_bss_fixed$resid_adj~orgaIL8_bss_fixed$fever7d_aboveavg) #yes indeed, much more convincing
+
+#plot the combined data, men vs women
+ps <- ggplot(orgaIL8_bss, aes(x=fever7d_aboveavg, y=resid_adj)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0) +
+  facet_grid(.~Sex)
+ps
+
+#plot the combined data, men vs women-HC vs women+HC
+orgaIL8_bss$Sex_HC <- ifelse(orgaIL8_bss$Sex=="f", yes=paste(orgaIL8_bss$Sex, orgaIL8_bss$Hormonal_contraceptive, sep="_"),
+                             no=(orgaIL8_bss$Sex))
+p <- ggplot(orgaIL8_bss, aes(x=fever7d_aboveavg, y=resid_adj)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0) +
+  facet_grid(.~Sex_HC)
+p
+
+#rename 'fixed hormones' and plot it more nicely.
+orgaIL8_bss$baseline_temperature <- ifelse(orgaIL8_bss$Sex=="m" | orgaIL8_bss$Sex=="f"&orgaIL8_bss$Hormonal_contraceptive=="y",
+                                     "constant", "cyclical")
+
+wilcox.test(orgaIL8_bss_m$resid_adj~orgaIL8_bss_m$fever7d_aboveavg) #p=0.004
+wilcox.test(orgaIL8_bss_f$resid_adj~orgaIL8_bss_f$fever7d_aboveavg) #p=0.86
+
+#more correct: lms divided by sex.
+m7m <- lme(IL8.pg.mL ~ as.numeric(Bristol_Stool_Score) + fever7d_aboveavg, random=~1|Rep.Plate, data=orgaIL8_bss_m)
+summary(m7m) #p=0.01
+dim(orgaIL8_bss_m) #n=24
+m7f <- lme(IL8.pg.mL ~ as.numeric(Bristol_Stool_Score) + fever7d_aboveavg, random=~1|Rep.Plate, data=orgaIL8_bss_f)
+summary(m7f) #NS p=0.35
+dim(orgaIL8_bss_f) #n=36
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S11B_OrgaIL8_sexeffects1.pdf")
+p <- ggplot(orgaIL8_bss, aes(x=Sex, y=resid_adj, colour=fever7d_aboveavg)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0)) +
+  scale_colour_manual(values=c("grey60", "firebrick3")) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  xlab("Sex") + ylab("IL-8 Adjusted (pg/mL)") + labs(colour="Fever") +
+  annotate('segment', x=0.75, xend=1.25, y=354, yend=354) +
+  annotate('segment', x=1.75, xend=2.25, y=354, yend=354) +
+  annotate('text', x=1, y=354.5, label=c("ns")) +
+  annotate('text', x=2, y=354.5, label=c("*"), size=6)
+p
+#dev.off()
+
+orgaIL8_bss$baseline_temperature <- factor(orgaIL8_bss$baseline_temperature, levels=c("cyclical", "constant"))
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S11B_OrgaIL8_sexeffects2.pdf")
+p <- ggplot(orgaIL8_bss, aes(x=baseline_temperature, y=resid_adj, colour=fever7d_aboveavg)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0)) +
+  scale_colour_manual(values=c("grey60", "firebrick3")) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  xlab("Baseline Body Temperature") + ylab("IL-8 Adjusted (pg/mL)") + labs(colour="Fever") +
+  annotate('segment', x=0.75, xend=1.25, y=354, yend=354) +
+  annotate('segment', x=1.75, xend=2.25, y=354, yend=354) +
+  annotate('text', x=1, y=354.5, label=c("ns")) +
+  annotate('text', x=2, y=354.5, label=c("*"), size=6)
+p
+#dev.off()
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S11B_OrgaIL8_sexeffects3.pdf")
+p <- ggplot(orgaIL8_bss_f, aes(x=Hormonal_contraceptive, y=resid_adj, colour=fever7d_aboveavg)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0)) +
+  scale_colour_manual(values=c("grey60", "firebrick3")) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  xlab("Hormonal contraceptive") + ylab("IL-8 Adjusted (pg/mL)") + labs(colour="Fever")
+p
+#dev.off()
+
+#similar Q - plot by IGB1 lo category, nicely.
+orgaIL8_bss$IgG_B1_aboveavg <- factor(orgaIL8_bss$IgG_B1_aboveavg, levels=c("lo", "hi"))
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/0G_FeverOrgaIL8_ByIgGLo.pdf")
+p <- ggplot(orgaIL8_bss, aes(x=fever7d_aboveavg, y=resid_adj, colour=fever7d_aboveavg)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0)) +
+  scale_colour_manual(values=c("grey60", "firebrick3")) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  xlab("Fever") + ylab("IL-8 Adjusted (pg/mL)") + labs(colour="Fever") + theme(legend.position='none') +
+  facet_grid(.~IgG_B1_aboveavg)
+p
+#dev.off()
+
+
+#compare to fever ºC by category
+p <- ggplot(orgaIL8_bss, aes(x=baseline_temperature, y=fever7d, colour=fever7d_aboveavg)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0)) +
+  scale_colour_manual(values=c("grey60", "firebrick3")) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  xlab("Baseline Body Temperature") + ylab("Fever (ºC)") + labs(colour="Fever")
+  #annotate('segment', x=0.75, xend=1.25, y=354, yend=354) +
+  #annotate('segment', x=1.75, xend=2.25, y=354, yend=354) +
+  #annotate('text', x=1, y=354.5, label=c("*"), size=6) +
+  #annotate('text', x=2, y=354.5, label=c("ns"))
+p
+
+#versus non-adjusted values. #although massive batch effect.
+p <- ggplot(orgaIL8_bss, aes(x=baseline_temperature, y=IL8.pg.mL, colour=fever7d_aboveavg)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0)) +
+  scale_colour_manual(values=c("grey60", "firebrick3")) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  xlab("Body Temperature") + ylab("IL-8 (pg/mL)")
+p
+wilcox.test(orgaIL8_bss_fixed$IL8.pg.mL~orgaIL8_bss_fixed$fever7d_aboveavg) #p=0.06
+wilcox.test(orgaIL8_bss_fixed$resid_adj~orgaIL8_bss_fixed$fever7d_aboveavg) #p=0.002
+wilcox.test(orgaIL8_bss_cycle$IL8.pg.mL~orgaIL8_bss_cycle$fever7d_aboveavg) #NS
+wilcox.test(orgaIL8_bss_cycle$resid_adj~orgaIL8_bss_cycle$fever7d_aboveavg) #NS
+
+#putting hormones in the model as an interaction effect
+m7b <- lme(IL8.pg.mL ~ as.numeric(Bristol_Stool_Score) + Sex*fever7d_aboveavg, random=~1|Rep.Plate, data=orgaIL8_bss)
+summary(m7b) #NS
+
+m7c <- lme(IL8.pg.mL ~ as.numeric(Bristol_Stool_Score) + fixed_hormones*fever7d_aboveavg, random=~1|Rep.Plate, data=orgaIL8_bss)
+summary(m7c) #fever p=0.03, but hormones NS
+
+#and yet just in the boys it must be quite significant?
+m7m <- lme(IL8.pg.mL ~ as.numeric(Bristol_Stool_Score) + fever7d_aboveavg, random=~1|Rep.Plate, data=orgaIL8_bss_m)
+summary(m7m) #p=0.01
+m7mf <- lme(IL8.pg.mL ~ as.numeric(Bristol_Stool_Score) + fever7d_aboveavg, random=~1|Rep.Plate, data=orgaIL8_bss_fixed)
+summary(m7mf) #p=0.01
+m7f <- lme(IL8.pg.mL ~ as.numeric(Bristol_Stool_Score) + fever7d_aboveavg, random=~1|Rep.Plate, data=orgaIL8_bss_f)
+summary(m7f) #NS
+
+#all generic controls
+m8 <- lme(IL8.pg.mL ~ as.numeric(Bristol_Stool_Score) + Sex + Age + IgG_B1_aboveavg + LastFeverAny + fever7d_aboveavg, random=~1|Rep.Plate, data=orgaIL8_bss)
+summary(m8) #p=0.008
+
+#fever continuous
+m9 <- lme(IL8.pg.mL ~ as.numeric(Bristol_Stool_Score) + fever7d, random=~1|Rep.Plate, data=orgaIL8_bss)
+summary(m9) #p=0.007 #that's nice
+
+p <- ggplot(orgaIL8_bss, aes(x=IL8.pg.mL, y=fever7d)) + geom_point() +
+  geom_smooth(method='lm')  +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = "black")) 
+p #it's not thaaat pretty
+
+#EXPORT the total organoid data for use in other analyses.
+orgaIL8_export <- orgaIL8_bss %>% dplyr::select("Participant_ID", "IL8.pg.mL", "Rep", "Plate", "Bristol_Stool_Score", "resid_adj")
+#write.csv(orgaIL8_export, "/ebio/abt3_projects2/uHEAT/data/Organoid_RNAseq/OrganoidIL8All.csv")
+
+```

@@ -1,0 +1,325 @@
+---
+title: "09.Infections"
+author: "Kelsey Huus"
+date: "2024-08-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+##Packages
+library(dplyr)
+library(ggplot2)
+library(data.table)
+library(tidyr)
+library(ggrepel)
+library(nlme)
+library(ggpubr)
+
+```
+
+```{r data processing}
+
+##FOR DATA PROCESSING, SEE: /ebio/abt3_projects2/uHEAT/code/flagellome/flapro_nb_uHEAT_v2.ipynb, by AT and AB
+#this notebook is just to plot the results more coherently with the other figures
+
+```
+
+```{r import}
+
+#metadata for transcriptomics
+meta_seq <- read.csv("/ebio/abt3_projects2/uHEAT2/data/metadata/meta_seq_rna_fever7d_series1_24.08.18.csv") 
+meta_seq$Group <- factor(meta_seq$fever7d_aboveavg, levels=c("lo", "hi"))
+meta_seq$Diet3 <- ifelse(meta_seq$Diet %in% c("Vegan", "Vegetarian"), yes="Veg", no="Omni")
+
+##Results1: RNA only, baseline only
+flapro_rel_total_MTX <- read.delim("/ebio/abt3_projects2/uHEAT/code/flagellome/out/uHEAT/flapro_rel_total_MTX.tsv")
+flapro_rel_num_present_MTX <- read.delim("/ebio/abt3_projects2/uHEAT/code/flagellome/out/uHEAT/flapro_rel_num_present_MTX.tsv")
+flapro_alpha_MTX <- read.delim("/ebio/abt3_projects2/uHEAT/code/flagellome/out/uHEAT/flapro_alpha_MTX.tsv")
+
+##Results2: DNA/RNA ratio, baseline only
+
+##Results 3: RNA only, all samples
+
+##Results 4: DNA/RNA ratio, all samples
+
+```
+
+```{r definitions}
+
+STAT_PLOT_CMP = list(c("lo", "hi"))
+COHORT_COLORS = c("lo" = "grey80", "hi" = "firebrick3")
+SCENARIO_COMPON = "MTX"
+
+```
+
+```{r plot summary old}
+
+##Alex's plot, a little simplified
+
+
+# compare total relative fla counts across the groups
+p1 = flapro_rel_total_MTX %>% inner_join(meta_seq, by = c("Sample"="SampleID")) %>%
+    ggplot(aes(x = Group, y = sum_rel_abund, fill = Group)) +
+    geom_violin() +
+    geom_boxplot(width = 0.3, fill = "white") +
+    geom_jitter(width = 0.1, height = 0, alpha = 0.2, size = 2, color = "#000000") +    
+    theme_bw() +
+    scale_fill_manual(values = COHORT_COLORS) +
+    # no grid
+	theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+    # y axis title: Abundance
+	ylab("Flagellome rel. abundance") +
+    # legend off
+    theme(legend.position = "none")
+
+p2 = flapro_rel_num_present_MTX %>% inner_join(meta_seq, by = c("Sample"="SampleID")) %>%
+    ggplot(aes(x = Group, y = n_non_zero, fill = Group)) +
+    geom_violin() +
+    geom_boxplot(width = 0.3, fill = "white") +
+    geom_jitter(width = 0.1, height = 0, alpha = 0.2, size = 2, color = "#000000") +    
+    theme_bw() +
+    scale_fill_manual(values = COHORT_COLORS) +
+    # no grid
+	theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+    # y axis title: Abundance
+	ylab("# of expressed flagellins") +
+    # legend off
+    theme(legend.position = "none")
+
+#p.dims(3.5, 3)
+p = ggarrange(p1, ncol = 1)
+annotate_figure(p, top = text_grob(SCENARIO_COMPON))
+
+#p.dims(3.5, 3)
+p = ggarrange(p2, ncol = 1)
+annotate_figure(p, top = text_grob(SCENARIO_COMPON))
+
+#check summary stats #adjusted via mixed linear model for Age, Sex, ID
+summary_stats <- read.delim("/ebio/abt3_projects2/uHEAT/code/flagellome/out/uHEAT/lo__hi/Grouphi/stat_summ_Fla_feats_MTX.tsv")
+summary_stats
+summary_hits <- summary_stats %>% filter(p.value<0.1)
+summary_hits
+
+#and now make a version of the plots showing only the n_non_zero, faceted, by silent / stim.
+flapro_rel_num_present_by_Cluster_PredMTX <- read.delim("/ebio/abt3_projects2/uHEAT/code/flagellome/out/uHEAT/flapro_rel_num_present_by_Cluster_PredMTX.tsv")
+
+#plus, add the total # on top of that, from before.
+flapro_rel_num_present_MTX$Cluster_Pred <- c("total")
+flapro_rel_num_present_MTX$feature <- c("n_non_zero")
+
+flapro_rel_num_present_by_Cluster_PredMTX <- flapro_rel_num_present_MTX %>%
+  rename("value"="n_non_zero") %>%
+  full_join(flapro_rel_num_present_by_Cluster_PredMTX)
+
+#add a data frame to put the labels in the right spot 
+sigdf <- data.frame(Group=1.5, value=c(150, 150, 150), 
+                    Cluster_Pred=c("active","silent", "total"), label=c("p=0.06", "p=0.03", "p=0.05"))
+
+
+p2b = flapro_rel_num_present_by_Cluster_PredMTX %>% 
+    filter(Cluster_Pred %in% c("active", "silent", "total")) %>% 
+    inner_join(meta_seq, by = c("Sample"="SampleID")) %>%
+    mutate(Cluster_Pred = factor(Cluster_Pred, levels = c("active", "silent", "total"))) %>%
+    ggplot(aes(x = Group, y = value, fill = Group)) +    
+    geom_violin(alpha=0.5) +
+        geom_boxplot(width = 0.2, fill = "white") +
+        geom_jitter(width = 0.1, height = 0, alpha = 0.3, size = 2, color = "#000000") + 
+    theme_bw() +
+    scale_y_log10() +
+    facet_grid(~Cluster_Pred) +
+    scale_fill_manual(values = COHORT_COLORS) +
+    # no grid
+	theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+    # y axis title: Abundance
+	ylab("# of expressed flagellin clusters") + xlab("Fever") +
+    # legend off
+    theme(legend.position = "none")  +
+        geom_text(data = sigdf, aes(x = Group, y = value, label = label), inherit.aes = FALSE, size=3)
+print(p2b)
+
+#pdf(width=4, height=3, "/ebio/abt3_projects2/uHEAT/data/plots5/Flagellome_GroupCounts.pdf")
+print(p2b)
+#dev.off()
+
+```
+
+```{r plot alpha}
+
+##alpha diversity
+flapro_alpha <- flapro_alpha_MTX %>% 
+        pivot_longer(cols = -Sample, names_to = "feature", values_to = "value")
+
+#add a data frame to put the labels in the right spot
+sigdf <- data.frame(Group=1.5, value=c(max(flapro_alpha_MTX$Chao1), max(flapro_alpha_MTX$Observed), max(flapro_alpha_MTX$Shannon)), 
+                    feature=c("Chao1","Observed","Shannon"), label="*")
+#segdf <- data.frame(pays=c(1,2), primarymain_r=c(105,105), SampleType=factor("Feces", levels = #c("Gastric","Duodenanl","Feces")), label="*")
+
+p3 = flapro_alpha %>% inner_join(meta_seq, by = c("Sample"="SampleID")) %>%    
+        ggplot(aes(x = Group, y = value, fill = Group)) +        
+        geom_violin(alpha=0.5) +
+        geom_boxplot(width = 0.2, fill = "white", outlier.shape=NA) +
+        geom_jitter(width = 0.1, height = 0, alpha = 0.2, size = 2, shape=21, colour = "#000000") + 
+        theme_bw() +
+        facet_wrap(~feature, scales = "free") +
+        scale_fill_manual(values = COHORT_COLORS) +
+        # no grid
+        theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+        # y axis title: Abundance
+        ylab("Flagellome alpha diversity") + xlab("Fever") +
+        # legend off
+        theme(legend.position = "none") +
+        geom_text(data = sigdf, aes(x = Group, y = value, label = label), inherit.aes = FALSE, label = "*", size=6)
+        #geom_line(data=segdf)
+print(p3)
+#p.dims(3.5, 3)
+#p = ggarrange(p3, ncol = 1)
+#p
+
+#pdf(width=4, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/3C.Flagellome_AlphaDiversity.pdf")
+print(p3)
+#dev.off()
+
+#check alpha diversity stats #adjusted via mixed linear model for Age, Sex, ID
+alpha_stats <- read.delim("/ebio/abt3_projects2/uHEAT/code/flagellome/out/uHEAT/lo__hi/Grouphi/stat_alpha_MTX.tsv")
+alpha_stats #all are significant :) 
+
+##CHECK: mixed linear model but controlling for diet, too.
+flapro_alpha_meta <- flapro_alpha %>% 
+  pivot_wider(names_from=feature, values_from=value) %>%
+  rename(SampleID=Sample) %>%
+  full_join(meta_seq)
+
+#Observed
+m1 <- lme(Observed ~ Age + Sex + fever7d_aboveavg, random=~1|Participant_ID, data = flapro_alpha_meta, 
+            na.action=na.exclude, method="ML")
+summary(m1) #p=0.01 - just double checking.
+
+m2 <- lme(Observed ~ Age + Sex + Diet3 + fever7d_aboveavg, random=~1|Participant_ID, data = flapro_alpha_meta, 
+            na.action=na.exclude, method="ML")
+summary(m2) #fever is still p=0.01
+
+#Chao1
+m1 <- lme(Chao1 ~ Age + Sex + fever7d_aboveavg, random=~1|Participant_ID, data = flapro_alpha_meta, 
+            na.action=na.exclude, method="ML")
+summary(m1) #p=0.01 - just double checking.
+
+m2 <- lme(Chao1 ~ Age + Sex + Diet3 + fever7d_aboveavg, random=~1|Participant_ID, data = flapro_alpha_meta, 
+            na.action=na.exclude, method="ML")
+summary(m2) #fever is still p=0.01
+
+#Shannon
+m1 <- lme(Shannon ~ Age + Sex + fever7d_aboveavg, random=~1|Participant_ID, data = flapro_alpha_meta, 
+            na.action=na.exclude, method="ML")
+summary(m1) #p=0.02 - just double checking.
+
+m2 <- lme(Shannon ~ Age + Sex + Diet3 + fever7d_aboveavg, random=~1|Participant_ID, data = flapro_alpha_meta, 
+            na.action=na.exclude, method="ML")
+summary(m2) #fever is still p=0.02
+
+
+##Updated: plot the alpha metrics but stratified 
+flapro_alpha_strat_MTX <- read.delim("/ebio/abt3_projects2/uHEAT/code/flagellome/out/uHEAT/flapro_alpha_stratified_MTX.tsv")
+#take the Observed only, analagous to the total counts we were plotting before.
+flapro_alpha_strat_MTX <- flapro_alpha_strat_MTX %>% filter(feature=="Observed")
+#rename "all" as "total"
+flapro_alpha_strat_MTX$Cluster_Pred <- gsub("all", "total", flapro_alpha_strat_MTX$Cluster_Pred)
+
+#add a data frame to put the labels in the right spot
+#sigdf <- data.frame(Group=1.5, value=c(150, 150, 150), 
+#                    Cluster_Pred=c("active","silent", "total"), label=c("p=0.06", "p=0.03", "p=0.05"))
+
+sigdf <- data.frame(Group=1.5, value=c(150, 150, 150), 
+                    Cluster_Pred=c("active","silent", "mixed"), label=c("p=0.06", "*", "NS"),
+                    size=c(3, 6, 3))
+
+p2b = flapro_alpha_strat_MTX %>% 
+    filter(Cluster_Pred %in% c("active", "silent", "mixed")) %>% 
+    inner_join(meta_seq, by = c("Sample"="SampleID")) %>%
+    mutate(Cluster_Pred = factor(Cluster_Pred, levels = c("active", "silent", "mixed"))) %>%
+    ggplot(aes(x = Group, y = value, fill = Group)) +    
+    geom_violin(alpha=0.5) +
+        geom_boxplot(width = 0.2, fill = "white", outlier.shape=NA) +
+        geom_jitter(width = 0.1, height = 0, alpha = 0.2, size = 2, shape=21, colour = "#000000") + 
+    theme_bw() +
+    scale_y_log10() +
+    facet_grid(~factor(Cluster_Pred, levels = c("active", "silent", "mixed"))) +
+    scale_fill_manual(values = COHORT_COLORS) +
+    # no grid
+	theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+    # y axis title: Abundance
+	ylab("Observed") + xlab("Fever") +
+    # legend off
+    theme(legend.position = "none")  +
+        geom_text(data = sigdf, aes(x = Group, y = value, label = label, size=size), inherit.aes = FALSE) + scale_size_identity()
+print(p2b)
+
+#pdf(width=4, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/3D_Flagellome_Alpha_ByGroup.pdf")
+print(p2b)
+#dev.off()
+
+```
+
+```{r plot flagellins}
+
+##Alex's plot, a little simplified
+
+STAT_PLOT_CMP = list(c("lo", "hi"))
+COHORT_COLORS = c("lo" = "#008ea0", "hi" = "#c71000")
+SCENARIO_COMPON = "MTX"
+
+#check the individual flagellin stats #mixed linear model
+fla_stats <- read.delim("/ebio/abt3_projects2/uHEAT/code/flagellome/out/uHEAT/lo__hi/Grouphi/stat_Fla_MTX.tsv")
+fla_stats %>% filter(p.adj<0.1) %>% as.data.frame()
+fla_hits <- fla_stats %>% filter(p.adj<0.1) %>% as.data.frame()
+
+#and the original data per flagellin
+flapro_rel_no_zeros_MTX <- read.delim("/ebio/abt3_projects2/uHEAT/code/flagellome/out/uHEAT/flapro_rel_no_zeros_MTX.tsv")
+flapro_rel_no_zeros_MTX <- flapro_rel_no_zeros_MTX %>% pivot_longer(cols=c(8:(length(names(flapro_rel_no_zeros_MTX)))),
+                                                                    names_to="Sample", values_to="value") %>%
+  select(FlaCluster, Sample, value)
+
+num_finds = nrow(fla_hits)
+num_finds
+num_per_row = 5
+
+my_w = min(10, 10 * (num_finds / num_per_row))
+my_w
+my_h = 3 * ceiling(num_finds / num_per_row)
+my_h
+
+p.dims(my_w, my_h) 
+ttt = flapro_rel_no_zeros_MTX %>% 	
+    	inner_join(fla_hits, by = c("FlaCluster"="feature")) %>% 	
+	inner_join(meta_seq, by = c("Sample"="SampleID")) %>% 
+	mutate(sign_estimate = factor(sign(estimate))) %>% 		
+	mutate(Cluster_Species_trimmed = ifelse(		
+			str_detect(Cluster_Species, ";"),			
+			paste0(str_extract(Cluster_Species, "^[^;]+"), "+"),
+			Cluster_Species)		
+	) %>%
+	mutate(FlaCluster_ext = paste(FlaCluster, "\n", Cluster_Species_trimmed, "\n", Cluster_Pred, sep = "")) 
+#ttt
+if(nrow(ttt) > 0) {
+	ggplot(ttt, aes(y = value, x = Group)) +		
+		## log scale y
+		#scale_y_log10() +
+		geom_boxplot(width = 0.1) +
+		geom_violin(color="#888888", alpha=0.1, size=0.5) +
+		geom_jitter(aes(color = sign_estimate), alpha=0.1, size=3, width=0.3, height = 0) +
+		scale_color_manual(values = c("-1" = "blue", "1" = "red")) +
+		facet_wrap(~FlaCluster_ext, ncol = num_per_row, scales = "free") +			
+		theme_bw() +
+    scale_y_log10() +
+		# no grid
+		theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+		# no grey fill for facet
+		theme(strip.background = element_blank()) +
+		# no legend
+		theme(legend.position = "none") +
+
+		# y axis title: Abundance
+		ylab("Relative abundance (log10)")
+}
+
+```

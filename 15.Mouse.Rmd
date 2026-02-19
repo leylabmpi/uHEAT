@@ -1,0 +1,794 @@
+---
+title: "15.MouseData"
+author: "Kelsey Huus"
+date: "2025-02-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+##Packages
+library(dplyr)
+library(ggplot2)
+#library(data.table)
+library(tidyr)
+```
+
+```{r metadata}
+
+#per-sample metadata #note: mocks, blanks & samples with low read depth already excluded #so are old & infected samples
+#updated: this version also excludes SERIES 2 of all double series.
+meta_seq <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/meta_seq_clean_series1.24.08.18.csv", 
+                     row.names=1)
+meta_seq$Bristol_Stool_Score2 <- ifelse(meta_seq$Bristol_Stool_Score2=="bNA", yes=NA, no=meta_seq$Bristol_Stool_Score2) #correct BSS label error
+meta_seq$fever7d_aboveavg <- factor(meta_seq$fever7d_aboveavg, levels=c("lo", "hi"))
+
+#number of clean samples
+length(meta_seq$SampleID)
+
+#per-person metadata, matching
+meta <- meta_seq %>% filter(!duplicated(Participant_ID)&!is.na(fever7d_aboveavg)) %>%
+  dplyr::select(-c(SampleID, Relative_Day, Time0, Time01))
+dim(meta)
+
+```
+
+```{r mouse metadata}
+#mouse metadata
+mouse_meta <- read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/wt_fmt_metadata.csv")
+mouse_meta
+mouse_meta$Participant_ID <- sapply(strsplit(mouse_meta$SampleID,"_"), `[`, 1)
+mouse_meta$Participant_ID <- gsub("H", "HEAT_", mouse_meta$Participant_ID)
+
+```
+
+
+```{r mouse T}
+#import temperature data
+mt <- read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/mouse_temperature_data_forR.csv")
+mt$Participant_ID <- gsub("H", "HEAT_", mt$donor)
+
+#combine with metadata.
+mt_meta <- mt %>% filter(donor!="") %>% #there is one missing line because a mouse died
+  full_join(meta)
+
+#plot by fever
+p <- ggplot(mt_meta, aes(x=fever7d_aboveavg, y=T_24h)) + geom_boxplot() + geom_jitter(width=0.1, height=0)
+p
+
+wilcox.test(mt_meta$T_24h~mt_meta$fever7d_aboveavg) #also still highly significant, p=0.0008
+
+#does it correlate with the actual fever of the donor?
+#yes, definitely
+#cairo_pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/MouseFeverVsHumanFever.pdf")
+p <- ggplot(mt_meta, aes(x=fever7d, y=T_24h)) + geom_point() +
+  geom_smooth(method='lm') +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = "black")) +
+  xlab("Donor Fever (ºC)") + ylab("Mouse ∆T (ºC)") +
+  annotate("text", x=1.5, y=0, label=c("p=0.002\nrho=-0.61"), hjust=0)
+p
+#dev.off()
+
+cor.test(mt_meta$fever7d, mt_meta$T_24h, method='spearman') #p=0.001
+#table dimensions are very large, double check
+mt_meta2 <- mt_meta %>% filter(!is.na(fever7d)&!is.na(T_24h))
+dim(mt_meta2) #n=23 as expected.
+cor.test(mt_meta2$fever7d, mt_meta2$T_24h, method='spearman') #p=0.001
+
+#does it look cleaner or messier if we average per donor? (n=2 mice per donor)
+mt_sum <- mt_meta %>% group_by(Participant_ID, fever7d, fever7d_aboveavg) %>%
+  summarize(T_24h=mean(T_24h))
+
+#very clean
+p1 <- ggplot(mt_sum, aes(x=fever7d_aboveavg, y=T_24h)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p1
+wilcox.test(mt_sum$T_24h~mt_sum$fever7d_aboveavg) #also still highly significant, p=0.005, and I honestly think it looks cleaner
+
+p2 <- ggplot(mt_sum, aes(x=fever7d, y=T_24h)) + geom_point() +
+  geom_smooth(method='lm') +
+  theme_bw()
+p2
+
+cor.test(mt_sum$fever7d, mt_sum$T_24h, method='spearman') #p=0.005
+
+#plot the entire temperature data, also raw. ?? need to process this from hirohito
+
+#in people there was no gender effect. human & mouse are sex-matched. Sex effect?
+mt_meta <- mt_meta %>% filter(!is.na(T_24h))
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S13A_MouseTempbySex.pdf")
+p <- ggplot(mt_meta, aes(x=fever7d_aboveavg, y=T_24h, colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0) +
+  facet_grid(.~Sex) +
+    scale_colour_manual(values=c("grey60", "firebrick3")) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  xlab("Fever") + labs(colour="Fever") + ylab("∆T (ºC)")
+p # it is very clearly seen in both sexes - but a bit stronger in males
+#dev.off()
+
+```
+
+```{r mouse cytokines}
+mc <- read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/mouse_cytokine_data_forR2.csv") #now with il1b added
+mc$Participant_ID <- gsub("H", "HEAT_", mc$donor)
+
+mc1 <- mc %>% 
+  dplyr::select(T0, T24, Participant_ID, cytokine) %>%
+  pivot_longer(cols=c(1:2), names_to="TimeCytokine", values_to="cytokine.pg.mL")
+mc1 <- mc1 %>% full_join(meta) #add real donor info
+
+il8 <- mc1 %>% filter(cytokine=="CXCL1")
+
+p <- ggplot(il8, aes(x=fever7d_aboveavg, y=cytokine.pg.mL)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0) +
+  facet_grid(.~TimeCytokine)
+p
+
+il8_t0 <- il8 %>% filter(TimeCytokine=="T0")
+il8_t24 <- il8 %>% filter(TimeCytokine=="T24") %>% filter(!is.na(fever7d_aboveavg))
+
+p <- ggplot(il8_t0, aes(x=fever7d_aboveavg, y=cytokine.pg.mL)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p
+
+p <- ggplot(il8_t24, aes(x=fever7d_aboveavg, y=cytokine.pg.mL)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p
+
+#is there a sex effect?
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S13C_MouseIL8bySex.pdf")
+p <- ggplot(il8_t24, aes(x=fever7d_aboveavg, y=cytokine.pg.mL, colour=fever7d_aboveavg)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0) +
+  facet_grid(.~Sex) +
+    scale_colour_manual(values=c("grey60", "firebrick3")) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  xlab("Fever") + labs(colour="Fever") + ylab("IL-8 (pg/mL)")
+p #actually looks much stronger in females than males
+#dev.off()
+summary(aov(il8_t24$cytokine.pg.mL~il8_t24$fever7d_aboveavg*il8_t24$Sex)) #strong sex effect but no significant interaction
+
+#dev.off()
+
+il8_t24_f <- il8_t24 %>% filter(Sex=="f")
+wilcox.test(il8_t24_f$cytokine.pg.mL~il8_t24_f$fever7d_aboveavg) #NS. OK FINE.
+
+#how does it look compared to real fever? #eh... right trend, but messy.
+p <- ggplot(il8_t24, aes(x=fever7d, y=cytokine.pg.mL)) + 
+  geom_point() + geom_smooth(method='lm')
+p
+
+#relative increase in IL8, similar to the temperature concept?
+il8_rel <- mc %>% 
+  dplyr::select(T0, T24, Participant_ID, cytokine) %>%
+  filter(cytokine=="CXCL1")
+il8_rel$IL8_foldchange <- il8_rel$T24 / il8_rel$T0
+il8_rel$IL8_rise <- il8_rel$T24 - il8_rel$T0
+
+il8_rel <- il8_rel %>% full_join(meta) %>% filter(!is.na(fever7d_aboveavg))
+il8_rel$fever7d_aboveavg <- factor(il8_rel$fever7d_aboveavg, levels=c("lo", "hi"))
+
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/0_Mouse_deltaIL8.pdf")
+p <- ggplot(il8_rel, aes(x=fever7d_aboveavg, y=IL8_foldchange)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0) +
+  theme_bw() +
+  xlab("Fever") + ylab("∆IL8 (pg/mL)") +
+  annotate('segment', x=1, xend=2, y=20, yend=20) +
+    annotate('text', x=1.5, y=21, label=c("p=0.13"))
+p
+#dev.off()
+wilcox.test(il8_rel$IL8_foldchange~il8_rel$fever7d_aboveavg) #p=0.13 it honestly looks nice!
+
+#sex effect??
+p <- ggplot(il8_rel, aes(x=fever7d_aboveavg, y=IL8_foldchange)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0) +
+  facet_grid(.~Sex)
+p #well, it's in both now, but stronger in males probably.
+summary(aov(il8_rel$IL8_foldchange~il8_rel$fever7d_aboveavg*il8_rel$Sex)) #NS
+
+
+p <- ggplot(il8_rel, aes(x=fever7d_aboveavg, y=IL8_rise)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p
+
+#does it look cleaner or messier if we average per donor? (n=2 mice per donor)
+il8_t24_sum <- il8_t24 %>% group_by(Participant_ID, fever7d, fever7d_aboveavg, Sex) %>%
+  summarize(cytokine.pg.mL=mean(cytokine.pg.mL))
+p <- ggplot(il8_t24_sum, aes(x=fever7d_aboveavg, y=cytokine.pg.mL)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p #....
+p <- ggplot(il8_t24_sum, aes(x=fever7d, y=cytokine.pg.mL)) + 
+  geom_point() + geom_smooth(method='lm')
+p #...
+
+il8_rel_sum <- il8_rel %>% group_by(Participant_ID, fever7d, fever7d_aboveavg) %>%
+  summarize(IL8_foldchange=mean(IL8_foldchange))
+
+p <- ggplot(il8_rel_sum, aes(x=fever7d_aboveavg, y=IL8_foldchange)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p #it does look better...
+wilcox.test(il8_rel_sum$IL8_foldchange~il8_rel_sum$fever7d_aboveavg) #p=0.4
+
+
+il6_24h <- mc1 %>% filter(cytokine=="IL6"&TimeCytokine=="T24")
+
+p <- ggplot(il6_24h, aes(x=fever7d_aboveavg, y=cytokine.pg.mL)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p
+wilcox.test(il6_24h$cytokine.pg.mL~il6_24h$fever7d_aboveavg) #
+
+#versus actual fever
+p <- ggplot(il6_24h, aes(x=fever7d, y=cytokine.pg.mL)) + 
+  geom_point() + geom_smooth(method='lm')
+p
+cor.test(il6_24h$cytokine.pg.mL, il6_24h$fever7d, method='spearman') #NS, but rho=0.2, so, slightly
+
+#summarized by donor..
+il6_24h_sum <- il6_24h %>% group_by(Participant_ID, fever7d_aboveavg) %>%
+  summarize(cytokine.pg.mL=mean(cytokine.pg.mL))
+p <- ggplot(il6_24h_sum, aes(x=fever7d_aboveavg, y=cytokine.pg.mL)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p #actually I think it looks slightly better again
+wilcox.test(il6_24h_sum$cytokine.pg.mL~il6_24h_sum$fever7d_aboveavg) #but p value is worse.
+
+#relative increase in IL6, similar to the temperature concept?
+il6_rel <- mc %>% 
+  dplyr::select(T0, T24, Participant_ID, cytokine) %>%
+  filter(cytokine=="IL6")
+il6_rel$il6_foldchange <- il6_rel$T24 / il6_rel$T0
+il6_rel$il6_rise <- il6_rel$T24 - il6_rel$T0
+
+il6_rel <- il6_rel %>% full_join(meta)
+
+p <- ggplot(il6_rel, aes(x=fever7d_aboveavg, y=il6_foldchange)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p
+wilcox.test(il6_rel$il6_foldchange~il6_rel$fever7d_aboveavg) #p=0.7 .... in the wrong direction
+
+p <- ggplot(il6_rel, aes(x=fever7d_aboveavg, y=il6_rise)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p
+wilcox.test(il6_rel$il6_rise~il6_rel$fever7d_aboveavg) #p=0.8
+
+#trying to explain why those 3 high IL-6 mice were high in IL-6
+p <- ggplot(il6_24h, aes(x=fever7d_aboveavg, y=cytokine.pg.mL)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0, aes(colour=Participant_ID)) +
+  geom_text(aes(label=Participant_ID))
+p
+
+il6_24h %>% filter(Participant_ID=="HEAT_022") #one of the really fever-high mice is the singleton (no donor pair), that's bad luck
+il6_24h <- il6_24h %>% filter(!is.na(Age))
+
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S13B_MouseIL6bySex.pdf")
+p <- ggplot(il6_24h, aes(x=fever7d_aboveavg, y=cytokine.pg.mL, colour=fever7d_aboveavg)) + 
+  geom_boxplot(outlier.shape=NA, outlier.size=NA) + geom_jitter(width=0.1, height=0) +
+  facet_grid(.~Sex) +
+    scale_colour_manual(values=c("grey60", "firebrick3")) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  xlab("Fever") + labs(colour="Fever") + ylab("IL-6 (pg/mL)")
+p
+#dev.off()
+
+#It's a little stronger in males at the cytokine level, similar to the organoid data (which of course are from the same donors as reps 1-2 at least)
+
+#does it correlate well with the organoid IL-8 data, TLR5 signal, etc.? yes - see below
+
+#add il1b
+il1b_24h <- mc1 %>% filter(cytokine=="IL1B"&TimeCytokine=="T24")
+il1b_24h$fever7d_aboveavg
+
+p <- ggplot(il1b_24h, aes(x=fever7d_aboveavg, y=cytokine.pg.mL)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p
+wilcox.test(il1b_24h$cytokine.pg.mL~il1b_24h$fever7d_aboveavg) #eeek.
+
+#versus actual fever
+p <- ggplot(il1b_24h, aes(x=fever7d, y=cytokine.pg.mL)) + 
+  geom_point() + geom_smooth(method='lm')
+p
+cor.test(il1b_24h$cytokine.pg.mL, il1b_24h$fever7d, method='spearman') #NS, messy
+
+#do IL1b and IL6 correlate?
+mc$delta <- mc$T24 - mc$T0
+mc2 <- mc %>% dplyr::select(-c(T0)) %>% tidyr::pivot_wider(names_from=cytokine, values_from=c(T24, delta))
+#pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/0_R1_GFWT_IL1bvsIL6.pdf")
+p <- ggplot(mc2, aes(x=T24_IL6, y=T24_IL1B)) + geom_point() + geom_smooth(method='lm') +
+  theme_bw() +
+  annotate('text', x=400, y=40, label=c("p=0.002\nrho=0.65"), hjust=0) +
+  xlab("IL-6 (pg/mL)") + ylab("IL-1B (pg/mL)")
+p
+#dev.off()
+cor.test(mc2$T24_IL6, mc2$T24_IL1B, method='spearman') #p=0.001, rho=0.65, of course :) 
+
+#and IL8?
+#pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/0_R1_GFWT_IL8vsIL6.pdf")
+p <- ggplot(mc2, aes(x=T24_IL6, y=T24_CXCL1)) + geom_point() + geom_smooth(method='lm') +
+  theme_bw() +
+  annotate('text', x=400, y=8500, label=c("p=0.001\nrho=0.63"), hjust=0) +
+  xlab("IL-6 (pg/mL)") + ylab("CXCL1 (pg/mL)")
+p
+#dev.off()
+cor.test(mc2$T24_IL6, mc2$T24_CXCL1, method='spearman') #p=0.001, rho=0.63
+cor.test(mc2$T24_IL6, mc2$delta_CXCL1, method='spearman') #p=0.001, rho=0.63, basically the same
+cor.test(mc2$delta_IL6, mc2$delta_CXCL1, method='spearman') #p=0.02, rho=0.5, worse
+
+##versus measured mouse ∆T at 24h
+mt$mouseid <- as.numeric(row.names(mt))
+mc3 <- mt %>% dplyr::select(mouseid, donor, T_5h, T_24h, T_48h, T_72h) %>% full_join(mc2)
+
+#cairo_pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/0_R1_GFWT_IL6vs∆T.pdf")
+p <- ggplot(mc3, aes(x=T24_IL6, y=T_24h)) + geom_point() + geom_smooth(method='lm') +
+  theme_bw() +
+  xlab("IL-6 (pg/mL)") + ylab("∆T (ºC)") +
+  annotate('text', x=700, y=0, label=c("p=0.58\nrho=-0.12"), hjust=0)
+p
+#dev.off()
+cor.test(mc3$T24_IL6, mc3$T_5h, method='spearman') #NS, rho=0.02
+cor.test(mc3$T24_IL6, mc3$T_24h, method='spearman') #NS, rho=-.12
+cor.test(mc3$T24_IL6, mc3$T_48h, method='spearman') #NS, rho=0.05
+cor.test(mc3$T24_IL6, mc3$T_72h, method='spearman') #NS, rho=-0.08
+
+
+p <- ggplot(mc3, aes(x=T24_IL1B, y=T_24h)) + geom_point() + geom_smooth(method='lm') +
+  theme_bw() +
+  xlab("IL-1B (pg/mL)") + ylab("∆T (ºC)")
+p #I mean it's a flat line entirely
+
+p <- ggplot(mc3, aes(x=T24_CXCL1, y=T_24h)) + geom_point() + geom_smooth(method='lm') +
+  theme_bw() +
+  xlab("IL-8 (pg/mL)") + ylab("∆T (ºC)")
+p #I mean it's a flat line entirely
+
+
+```
+
+```{r mouse lcn2}
+lcn2 <- read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/mouse_lcn2_forR.csv")
+mouse_meta
+
+lcn2$Mice.ID_Tube <- sapply(strsplit(lcn2$Sample,"_"), `[`, 2)
+lcn2$Mice.ID_Tube <- as.numeric(lcn2$Mice.ID_Tube)
+lcn2$Time <- sapply(strsplit(lcn2$Sample,"_"), `[`, 1)
+
+lcn2_meta <- full_join(lcn2, mouse_meta)
+
+lcn2_meta
+
+#and then add real meta, i.e., fever category.
+lcn2_meta <- meta %>%
+  select(Participant_ID, fever7d_aboveavg) %>%
+  full_join(lcn2_meta) %>% 
+  filter(!is.na(LCN2_pgmL)&!is.na(Mice.ID_Tube))
+lcn2_meta
+
+lcn2_meta$Time <- factor(lcn2_meta$Time, levels=c("T0", "T6", "T21"))
+
+#plot
+#pdf(width=4, height=3, "/ebio/abt3_projects2/uHEAT/data/Mouse/LCN2.pdf")
+p <- ggplot(lcn2_meta, aes(x=fever7d_aboveavg, y=LCN2_pgmL)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0) +
+  facet_grid(.~Time) +
+  theme_bw()
+p
+#dev.off()
+
+#much like Waltera, LCN2 trends opposite by fever category.
+
+#how about the T6 vs baseline difference, as Ruth asked?
+
+lcn2_delta <- lcn2_meta %>% filter(Time!="T21") %>%
+  select(Participant_ID, fever7d_aboveavg, Mice.ID_Tube, Time, LCN2_pgmL) %>%
+  pivot_wider(names_from=Time, values_from=LCN2_pgmL)
+lcn2_delta$LCN2_rise <- lcn2_delta$T6 - lcn2_delta$T0
+lcn2_delta$LCN2_fold <- lcn2_delta$T6 / lcn2_delta$T0
+
+p <- ggplot(lcn2_delta, aes(x=fever7d_aboveavg, y=LCN2_rise)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0) +
+  theme_bw()
+p
+wilcox.test(lcn2_delta$LCN2_rise~lcn2_delta$fever7d_aboveavg) #NS
+
+p <- ggplot(lcn2_delta, aes(x=fever7d_aboveavg, y=log(LCN2_fold))) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0) +
+  theme_bw()
+p
+wilcox.test(lcn2_delta$LCN2_fold~lcn2_delta$fever7d_aboveavg) #NS
+
+#is there an overall significant increase post-vaccine?
+pdata <- lcn2_meta %>% filter(Time!="T21")
+wilcox.test(pdata$LCN2_pgmL~pdata$Time) #very NS, that's kind of good
+
+```
+
+```{r hTLR5 input}
+#check the tlr activity of the inocula, based on previous screening
+
+#tlr and elisa data
+tlr_elisa <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/ELISA_TLR_all.csv", row.names=1)
+head(tlr_elisa)
+
+mouse_tlr <- full_join(tlr_elisa, mouse_meta, by="Participant_ID") %>% 
+  filter(!is.na(Mice.ID_Tube)) %>%
+  full_join(meta) %>%
+  filter(!is.na(fever7d_aboveavg)&!duplicated(Participant_ID)) #because I am checking donor info!
+mouse_tlr$fever7d_aboveavg <- factor(mouse_tlr$fever7d_aboveavg, levels=c("lo", "hi"))
+
+#pdf(width=3, height=3, '/ebio/abt3_projects2/uHEAT/data/RevisionPlots/0_Mouse_DonorTLR5_vsFeverHiLo.pdf')
+p <- ggplot(mouse_tlr, aes(x=fever7d_aboveavg, y=log(TLR5))) + 
+  geom_boxplot(outlier.shape=NA, outlier.size = NA) + geom_jitter(width=0.1, height=0) +
+  theme_bw() +
+  xlab("Fever") +
+  annotate('segment', x=1, xend=2, y=3.5, yend=3.5) + 
+  annotate('text', x=1.5, y=4, label=c("p=0.13"))
+p
+#dev.off()
+
+wilcox.test(mouse_tlr$TLR5~mouse_tlr$fever7d_aboveavg) #p=0.1
+wilcox.test(mouse_tlr$TLR2~mouse_tlr$fever7d_aboveavg) #p=0.3
+
+#also asked by a reviewer: Waltera abundance by donor?
+feces_df_genus <- read.csv("/ebio/abt3_projects2/uHEAT/code/R_code/uHEAT_CleanMarkdowns_Diet3/maaslin2_input/DNA_feces_df_genus.csv", row.names=1)
+feces_df_genus <- as.data.frame(t(feces_df_genus)) 
+feces_df_genus$SampleID <- row.names(feces_df_genus)
+feces_df_genus$Participant_ID <-sapply(strsplit(feces_df_genus$SampleID,"_"), `[`, 1)
+feces_df_genus$Participant_ID <-gsub("H", "HEAT_", feces_df_genus$Participant_ID)
+waltera_donor <- data.frame(Participant_ID=feces_df_genus$Participant_ID, Abundance=feces_df_genus$Acetatifactor)
+mouse_tlr_waltera <- mouse_tlr %>% 
+  filter(!is.na(Mice.ID_Tube)) %>%
+  full_join(waltera_donor) %>%
+  filter(!is.na(fever7d_aboveavg)&!duplicated(Participant_ID)) #because I am checking donor info!
+
+#pdf(width=3, height=3, '/ebio/abt3_projects2/uHEAT/data/RevisionPlots/0_Mouse_DonorWaltera_vsFeverHiLo.pdf')
+p <- ggplot(mouse_tlr_waltera, aes(x=fever7d_aboveavg, y=log(Abundance))) + 
+  geom_boxplot(outlier.shape=NA, outlier.size = NA) + geom_jitter(width=0.1, height=0) +
+  theme_bw() +
+  xlab("Fever") + ylab("Waltera (Log Rel. Abund.)") +
+    annotate('segment', x=1, xend=2, y=-3.5, yend=-3.5) + 
+  annotate('text', x=1.5, y=-3, label=c("p=0.18"))
+p
+#dev.off()
+wilcox.test(mouse_tlr_waltera$Abundance~mouse_tlr_waltera$fever7d_aboveavg) #p=0.18
+
+#check all TLRs, side by side.
+pdata <- mouse_tlr %>%
+  select(c(1:13), fever7d_aboveavg) %>%
+  pivot_longer(cols=c(2:4), names_to="TLR", values_to="Activity")
+
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=log(Activity))) + 
+  geom_boxplot(outlier.shape=NA, outlier.size = NA) + geom_jitter(width=0.1, height=0) +
+  facet_grid(.~TLR) +
+  theme_bw()
+p
+
+#does either ∆temperature, or IL6, associate with in vitro TLR5 signal or IL8 / IL18 signal from those people?
+#il-6 = il6_24h
+#dT = mt_meta
+
+#make a combined data frame with tlrs
+#tlr and elisa data
+tlr_elisa <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/ELISA_TLR_all.csv", row.names=1)
+head(tlr_elisa)
+gf_tlr <- il6_24h %>% dplyr::select(Participant_ID, cytokine.pg.mL) %>%
+  rename(IL6.pg.mL=cytokine.pg.mL) %>% #recall that there are 2 mice per donor
+  full_join(tlr_elisa) %>%
+  filter(!is.na(TLR5)&!is.na(IL6.pg.mL))
+dim(gf_tlr) #n=23 wt
+
+#cairo_pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/MouseIL6VsHumanTLR5.pdf")
+p <- ggplot(gf_tlr, aes(x=log(TLR5), y=IL6.pg.mL)) + geom_point() + geom_smooth(method='lm') +
+  theme_minimal() +
+  theme(axis.line = element_line(colour = "black")) +
+  xlab("Donor Flagellin (log ng/mL)") + ylab("Mouse IL-6 (pg/mL)") +
+  annotate("text", x=-3, y=700, label=c("p=0.02\nrho=0.48"), hjust=0)
+p #yes actually
+#dev.off()
+cor.test(gf_tlr$TLR5, gf_tlr$IL6.pg.mL, method='spearman') #p=0.02, rho=0.48 #the original version was a mistaken double
+
+
+p <- ggplot(mt_meta, aes(x=fever7d, y=T_24h)) + geom_point() +
+  geom_smooth(method='lm') +
+  
+p
+
+
+p <- ggplot(gf_tlr, aes(x=log(TLR5), y=T_24h)) + geom_point() + geom_smooth(method='lm')
+p #also
+cor.test(gf_tlr$TLR5, gf_tlr$T_24h, method='spearman') #p=0.002, rho=-0.43
+
+#and if we remove the 3 outliers (very high IL6), is it still true?
+outliers <- gf_tlr %>% filter(IL6.pg.mL>600)
+gf_tlr_no_outliers <- gf_tlr %>% filter(!(Participant_ID %in% outliers$Participant_ID))
+
+p <- ggplot(gf_tlr_no_outliers, aes(x=log(TLR5), y=IL6.pg.mL)) + geom_point() + geom_smooth(method='lm')
+p
+cor.test(gf_tlr_no_outliers$TLR5, gf_tlr_no_outliers$IL6.pg.mL, method='spearman') #p=0.08, rho=0.27
+
+p <- ggplot(gf_tlr_no_outliers, aes(x=log(TLR5), y=T_24h)) + geom_point() + geom_smooth(method='lm')
+p
+cor.test(gf_tlr_no_outliers$TLR5, gf_tlr_no_outliers$T_24h, method='spearman') #p=0.02, rho=-0.37
+
+
+#how about organoid IL8 at 4h for those samples.
+il8_4h_all <- read.csv("/ebio/abt3_projects2/uHEAT/data/Organoid_RNAseq/cytokines/IL8_4h_bothreps.csv", row.names=1)
+il8_4h_all$Participant_ID <- sapply(strsplit(il8_4h_all$SampleID,"_"), `[`, 1)
+il8_4h_all$Participant_ID <- gsub("H", "HEAT_", il8_4h_all$Participant_ID)
+gf_tlr <- il8_4h_all %>%
+  dplyr::select(Participant_ID, IL8) %>%
+  full_join(gf_tlr)
+
+p <- ggplot(gf_tlr, aes(x=log(IL8), y=T_24h)) + geom_point() + geom_smooth(method='lm')
+p #also
+cor.test(gf_tlr$IL8, gf_tlr$T_24h, method='spearman') #p=0.1 actually, less good
+
+p <- ggplot(gf_tlr, aes(x=log(IL8), y=IL6.pg.mL)) + geom_point() + geom_smooth(method='lm')
+p #also
+cor.test(gf_tlr$IL8, gf_tlr$IL6.pg.mL, method='spearman') #p=0.1 actually, less good
+
+#what about mouse TLR5 as measured: does this do better or worse than donor TLR5?
+gf_tlr51 <- read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/GF_TLR5interpolations_forR.csv")
+gf_tlr52 <- read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/GF_TLR5_summaries1.csv")
+#these data need to be interpreted in terms of donor ID 
+mouse_meta$MouseID <- paste("wt", mouse_meta$Mice.ID_Tube, sep="") 
+#mouse_meta$MouseID_dko <- paste("dko", mouse_meta$Mice.ID_Tube, sep="")
+#actually it's fine to only keep the wt samples because those are the ones we are trying to interpret anyways
+
+gf_tlr51 <- gf_tlr51 %>% 
+  rename(MouseID=Sample) %>%
+  full_join(mouse_meta)
+
+gf_tlr52 <- gf_tlr52 %>% 
+  rename(MouseID=Sample) %>%
+  full_join(mouse_meta) %>%
+  filter(Genotype=="wt")
+
+#take the 24h samples only
+gf_tlr52_24 <- gf_tlr52 %>% filter(Time=="T8")
+p <- ggplot(gf_tlr52_24, aes(x=FliC.ng.mL, y=IL6_24h)) + geom_point() + geom_smooth(method='lm')
+p #mouse raw TLR5 at the same time point: no
+
+p <- ggplot(gf_tlr52, aes(x=FliC.ng.mL, y=IL6_24h)) + geom_point() + geom_smooth(method='lm')
+p #mouse total TLR5 at all the time points; no
+
+p <- ggplot(gf_tlr52, aes(x=DeltaT5, y=IL6_24h)) + geom_point() + geom_smooth(method='lm')
+p #delta T5 at all the time points: of course not
+
+p <- ggplot(gf_tlr52_24, aes(x=DeltaT5, y=IL6_24h)) + geom_point() + geom_smooth(method='lm')
+p #delta T5 at 24h: no
+
+#because the data are also here and I noticed them: by fever7d? (I think I checked before though)
+p <- ggplot(gf_tlr52, aes(x=fever7d, y=IL6_24h)) + geom_point() + geom_smooth(method='lm')
+p #actually kind of, yes.
+cor.test(gf_tlr52$fever7d, gf_tlr52$IL6_24h, method='spearman') #p=0.06, rho=0.22
+
+p <- ggplot(gf_tlr52, aes(x=fever7d, y=dT_24h)) + geom_point() + geom_smooth(method='lm')
+p #really nice as well
+cor.test(gf_tlr52$fever7d, gf_tlr52$dT_24h, method='spearman') #extremely significant, rho=-0.6
+
+
+```
+
+```{r SPF experiment TLR5 on mouse samples}
+htlr5 <- read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/SPF_Diet/SPF_hTLR5_all.csv")
+htlr5_summary <- htlr5 %>% filter(Time!="T0") %>%
+  group_by(sample) %>% #average by sample also over replicates (some time points I repeated at a higher dilution)
+  summarize(FliC.ng.mL=mean(FliC.ng.mL),
+            median_FliC=median(FliC.ng.mL),
+            sd=sd(FliC.ng.mL, na.rm = TRUE))
+htlr5_summary
+
+#distance from baseline
+htlr5_d0 <- htlr5 %>% filter(Time=="T0")
+htlr5_d0 <- data.frame(sample=htlr5_d0$sample, FliC_base=htlr5_d0$FliC.ng.mL)
+
+htlr5_distance_from_base <- full_join(htlr5, htlr5_d0)
+htlr5_distance_from_base <- htlr5_distance_from_base %>% group_by(sample, Time)
+htlr5_distance_from_base$deltaT5 <- htlr5_distance_from_base$FliC.ng.mL - htlr5_distance_from_base$FliC_base
+htlr5_distance_from_base
+
+#make a distance from baseline that incorporates reads from both replicates (including 2nd dilution for hTLR5) - existing one does them separately
+htlr5_time_summary <- htlr5 %>%
+  group_by(sample, Time) %>%
+  summarize(FliC.ng.mL=mean(FliC.ng.mL))
+htlr5_time_summary
+
+htlr5_d02 <- htlr5_time_summary %>% filter(Time=="T0")
+htlr5_d02 <- data.frame(sample=htlr5_d02$sample, FliC_base=htlr5_d02$FliC.ng.mL)
+
+htlr5_distance_from_base2 <- full_join(htlr5_time_summary, htlr5_d02)
+htlr5_distance_from_base2 <- htlr5_distance_from_base2 %>% group_by(sample, Time)
+htlr5_distance_from_base2$deltaT5 <- htlr5_distance_from_base2$FliC.ng.mL - htlr5_distance_from_base2$FliC_base
+htlr5_distance_from_base2
+
+#write.csv(htlr5_distance_from_base2, "/ebio/abt3_projects2/uHEAT/data/Mouse/SPF_Diet/SPF_htlr5_distance_from_base_bothdilutionreps.csv")
+
+#rep2 1:15 is weird and on a completely different scale from the others. But as I've now seen, freeze-thaws do WEIRD things to the overall signal.
+#it's really not comparable between time points unless they are all processed the same.
+
+```
+
+```{r SPF experiment TLR4 on mouse samples}
+mtlr4 <- read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/SPF_Diet/SPF_mTLR4_all.csv")
+mtlr4_summary <- mtlr4 %>% filter(Time!=0) %>%
+  group_by(Sample) %>% #average by sample
+  summarize(LPS.ng.mL=mean(LPS.ng.mL),
+            median_LPS=median(LPS.ng.mL),
+            sd=sd(LPS.ng.mL, na.rm = TRUE))
+mtlr4_summary
+
+#distance from baseline
+mtlr4_d0 <- mtlr4 %>% filter(Time==0)
+mtlr4_d0 <- data.frame(Sample=mtlr4_d0$Sample, LPS_base=mtlr4_d0$LPS.ng.mL)
+
+mtlr4_distance_from_base <- full_join(mtlr4, mtlr4_d0)
+mtlr4_distance_from_base <- mtlr4_distance_from_base %>% group_by(Sample, Time)
+mtlr4_distance_from_base$deltaT4 <- mtlr4_distance_from_base$LPS.ng.mL - mtlr4_distance_from_base$LPS_base
+mtlr4_distance_from_base
+
+write.csv(mtlr4_summary, "/ebio/abt3_projects2/uHEAT/data/Mouse/SPF_Diet/SPF_mtlr4_summary.csv")
+write.csv(mtlr4_distance_from_base, "/ebio/abt3_projects2/uHEAT/data/Mouse/SPF_Diet/SPF_mtlr4_distance_from_base.csv")
+
+#also include / plot a summary ∆TLR4
+dmtlr4_summary <- mtlr4_distance_from_base %>% filter(Time!=0) %>%
+  group_by(Sample) %>% #average by sample
+  summarize(deltaT4=mean(deltaT4))
+dmtlr4_summary
+dmtlr4_summary$Group <- sapply(strsplit(dmtlr4_summary$Sample,'1|2|3|4|5|6|7|8'), `[`, 1)
+
+#I mean the trend is like very slightly in the right direction now
+p <- ggplot(dmtlr4_summary, aes(x=Group, y=log(deltaT4))) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0)
+p
+
+```
+
+```{r SPF experiment all correlations}
+#summary of all main spf data
+spf <- read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/SPF_Diet/SPF_cytokines_summary_R.csv")
+#Q: IL6 vs ∆T.
+cor.test(spf$deltaTemp_24h, spf$IL6.24h.pg.mL, method='spearman') #NS, rho=-0.12
+cor.test(spf$deltaTemp_48h, spf$IL6.24h.pg.mL, method='spearman') #NS, rho=-0.18
+cor.test(spf$deltaTemp_72h, spf$IL6.24h.pg.mL, method='spearman') #p=0.05, rho=-0.39 ; I should combine with the GF data. 
+cor.test(spf$deltaTemp_4d, spf$IL6.24h.pg.mL, method='spearman') #p=0.1, rho=-0.3
+cor.test(spf$deltaTemp_5d, spf$IL6.24h.pg.mL, method='spearman') #p=0.4, rho=-0.16
+spf$deltaT_avg <- rowMeans(spf[,c(2:6)])
+cor.test(spf$deltaT_avg, spf$IL6.24h.pg.mL, method='spearman') #p=0.06, rho=-0.38, hmph. 
+
+
+
+p <- ggplot(spf, aes(x=deltaT_avg, y=IL6.24h.pg.mL)) + geom_point(aes(colour=Diet)) + 
+  geom_smooth(method='lm') + theme_bw()
+p
+
+#make an alternative temperature boxplot for fig S13A, coloured by diet
+spf_pdata <- spf %>% pivot_longer(cols=c(2:6), names_to='Time', values_to='Temperature')
+spf_pdata$Time <- gsub("deltaTemp_", "", spf_pdata$Time, fixed=TRUE)
+p <- ggplot(spf_pdata, aes(x=Time, y=Temperature)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(aes(colour=Diet), width=0.1, height=0)
+p
+
+#In some kind of fair way. AUC?
+#Q: antibodies vs. baseline anything.
+cor.test(spf$IL6.24h.pg.mL, spf$IgG.endpoint, method='spearman') #p=0.08, rho=0.36 #check also when combined with GF experiment..
+cor.test(spf$IL8.24h.pg.mL, spf$IgG.endpoint, method='spearman') #p=0.03, rho=-0.44, sig negative correlation! huh.
+cor.test(spf$LCN2_24h_pg.mL, spf$IgG.endpoint, method='spearman') #NS
+cor.test(spf$deltaTemp_24h, spf$IgG.endpoint, method='spearman') #NS
+cor.test(spf$deltaTemp_72h, spf$IgG.endpoint, method='spearman') #NS. hmph.
+cor.test(spf$FliC.ng.mL_T41pre, spf$IgG.endpoint, method='spearman') #NS. 
+cor.test(spf$FliC.ng.mL_T56end, spf$IgG.endpoint, method='spearman') #NS. 
+cor.test(spf$LPS.ng.mL_T41pre, spf$IgG.endpoint, method='spearman') #NS. 
+cor.test(spf$LPS.ng.mL_T56end, spf$IgG.endpoint, method='spearman') #p=0.19 (NS), rho=-0.27
+
+#maybe I should check it via the microbiome? for example, other studies have found that streptococcus boosts IgG, and there was a lot of strep in the WSD microbiome
+#see microbiome analysis .Rmd
+
+#check combined SPF & GF, cytokines / temperature vs IgG at endpoint.
+gf <-read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/gf_summaries.csv")
+gf <- gf[,c(1:12)] #get rid of silly empty columns frome excel
+spf$Genotype <- c("WT_SPF")
+pdata <- full_join(gf, spf)
+dim(pdata) #n=75? mice
+
+p <- ggplot(pdata, aes(x=deltaTemp_24h, y=IL6.24h.pg.mL)) + 
+  geom_point(aes(colour=Genotype), size=3, alpha=0.5) +
+  geom_smooth(method='lm')
+p #the spf mice had no ∆temp change at 24h so it's bonkers #oh actually it's the SPF mice with very low IL6
+cor.test(pdata$deltaTemp_24h, pdata$IL6.24h.pg.mL, method='spearman') #technically sig, p=0.007, rho=-0.32
+
+p <- ggplot(pdata, aes(x=deltaTemp_72h, y=IL6.24h.pg.mL)) + geom_point() +
+  geom_smooth(method='lm')
+p 
+cor.test(pdata$deltaTemp_72h, pdata$IL6.24h.pg.mL, method='spearman') #surprisingly bad
+
+
+pdata1 <- pdata %>% filter(IL6.24h.pg.mL!=0&!is.na(IL6.24h.pg.mL))
+p <- ggplot(pdata1, aes(x=deltaTemp_24h, y=IL6.24h.pg.mL)) + geom_point() +
+  geom_smooth(method='lm')
+p #hmph
+cor.test(pdata1$deltaTemp_24h, pdata1$IL6.24h.pg.mL, method='spearman') #highly sig but 
+
+
+p <- ggplot(pdata, aes(x=IL6.24h.pg.mL, y=IgG.endpoint)) + geom_point() +
+  geom_smooth(method='lm')
+p #also no correlation across the experiments
+
+#IL6 vs ∆T for gf mice only.(previously I only looked at wt)
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/0_R1_GFall_IL6vs∆T.pdf")
+p <- ggplot(gf, aes(x=deltaTemp_24h, y=IL6.24h.pg.mL)) + 
+  geom_point(aes(colour=Genotype), size=3, alpha=0.5) +
+  geom_smooth(method='lm') +
+  theme_bw() + xlab("∆T (ºC)") + ylab("IL-6 (pg/mL)") +
+  annotate('text', x=-0.5, y=750, label=c("p=0.007\nrho=-0.39"), hjust=0)
+p #the DKO mice mostly don't have detectable IL6 so it's unhelpful.
+#dev.off()
+cor.test(gf$deltaTemp_24h, gf$IL6.24h.pg.mL, method='spearman') #p=0.007, rho=-0.39
+
+#only WT AND SPF mice, IL6 vs ∆T
+wt <- pdata %>% filter(Genotype %in% c("WT", "WT_SPF"))
+p <- ggplot(wt, aes(x=deltaTemp_24h, y=IL6.24h.pg.mL)) + geom_point() +
+  geom_smooth(method='lm')
+p #oh actually it's really unconvincing. but like partly because batch effect or something?
+
+
+p <- ggplot(pdata, aes(x=deltaTemp_24h, y=IL8.24h.pg.mL)) + geom_point() +
+  geom_smooth(method='lm')
+p 
+cor.test(pdata$deltaTemp_24h, pdata$IL8.24h.pg.mL, method='spearman') #p=0.04, rho=-0.24
+
+pdata$IL8_delta <- pdata$IL8.24h.pg.mL - pdata$IL8.0h.pg.mL
+p <- ggplot(pdata, aes(x=deltaTemp_24h, y=IL8_delta)) + geom_point() +
+  geom_smooth(method='lm')
+p 
+cor.test(pdata$deltaTemp_24h, pdata$IL8_delta, method='spearman') #p=0.04, rho=-0.24, quite similar.
+
+gf$IL8_delta <- gf$IL8.24h.pg.mL - gf$IL8.0h.pg.mL
+p <- ggplot(gf, aes(x=deltaTemp_24h, y=IL8_delta)) + geom_point() +
+  geom_smooth(method='lm')
+p 
+cor.test(gf$deltaTemp_24h, gf$IL8_delta, method='spearman') #p=0.02, rho=-0.34
+cor.test(gf$deltaTemp_24h, gf$IL8.24h.pg.mL, method='spearman') #p=0.02, rho=-0.33
+
+p <- ggplot(pdata, aes(x=deltaTemp_24h, y=percent_macrophages_endpoint)) + geom_point() +
+  geom_smooth(method='lm')
+p  #no
+
+p <- ggplot(pdata, aes(x=IL6.24h.pg.mL, y=percent_macrophages_endpoint)) + geom_point() +
+  geom_smooth(method='lm')
+p  #eh... no?
+cor.test(pdata$IL6.24h.pg.mL, pdata$percent_macrophages_endpoint, method='spearman') #NS
+
+
+```
+
+```{r GF hTLR5}
+hTLR5 <- read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/hTLR5.GF.csv")
+#calculate ∆TLR5 per time point per mouse #ng.mL is adjusted for dilution factor, etc. 
+hTLR5 <- hTLR5 %>% filter(Measurement==2) %>% #these were all done in parallel so most comparable over time
+  dplyr::select(-c(FliC.ug.mL)) #this is the unadjusted column and is confusing to retain
+
+hTLR5_t0 <- hTLR5 %>% filter(Time=="T6") %>% rename("FliC_T0" = "FliC.ng.mL") %>% dplyr::select(-c(Time, Comment))
+hTLR5 <- hTLR5 %>% full_join(hTLR5_t0)
+hTLR5$deltaFliC <- hTLR5$FliC.ng.mL - hTLR5$FliC_T0
+hTLR5
+hTLR5$mouse_id <- gsub("wt|dko", "", hTLR5$Sample)
+
+#write.csv(hTLR5, "/ebio/abt3_projects2/uHEAT/data/Mouse/hTLR5_summaries_GF_v2.csv")
+
+```
+
+
+```{r GF hTLR4}
+hTLR4 <- read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/hTLR4.GF.csv")
+#calculate ∆TLR4 per time point per mouse
+
+hTLR4_t0 <- hTLR4 %>% filter(Time=="T0") %>% rename("LPS_T0" = "LPS.ng.mL") %>% dplyr::select(-c(Time))
+hTLR4 <- hTLR4 %>% full_join(hTLR4_t0)
+hTLR4$deltaLPS <- hTLR4$LPS.ng.mL - hTLR4$LPS_T0
+hTLR4
+
+#write.csv(hTLR4, "/ebio/abt3_projects2/uHEAT/data/Mouse/hTLR4_summaries_GF.csv")
+
+```

@@ -1,0 +1,779 @@
+---
+title: "03.CRPCholCalpro"
+author: "Kelsey Huus"
+date: "2024-07-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+##Packages
+library(dplyr)
+library(ggplot2)
+#library(data.table)
+library(tidyr)
+```
+
+```{r metadata}
+#per-sample metadata #note: mocks, blanks & samples with low read depth already excluded #so are old & infected samples
+#updated: this version also excludes SERIES 2 of all double series.
+meta_seq <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/meta_seq_clean_series1.24.08.18.csv", 
+                     row.names=1)
+meta_seq$fever7d_aboveavg <- factor(meta_seq$fever7d_aboveavg, levels=c("lo", "hi"))
+
+#per-person metadata, matching
+meta <- meta_seq %>% filter(!duplicated(Participant_ID)&!is.na(fever7d_aboveavg)) %>%
+  dplyr::select(-c(SampleID, Relative_Day, Time0, Time01))
+dim(meta)
+
+#define DIET 3
+meta$Diet3 <- ifelse(meta$Diet %in% c("Vegan", "Vegetarian"), yes="Veg", no="Omni")
+meta_seq$Diet3 <- ifelse(meta_seq$Diet %in% c("Vegan", "Vegetarian"), yes="Veg", no="Omni")
+
+
+```
+
+```{r Calprotectin ELISA}
+
+lc <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/LCN2.Calpro.ELISA.Interpolations.csv")
+head(lc)
+#multiple both LCN2 and Calpro by 20 for dilution factor 
+#note that where the factor is different (plate 5) due to a 1:10 instead of 1:20 dilution, this is already manually adjusted by 1/2 in the excel sheet
+lc$LCN2 <- lc$LCN2*20
+lc$Calpro <- lc$Calpro*20
+#for the few duplicates, take an average per participant 
+lc$Participant_ID <- sapply(strsplit(lc$SampleID,"_"), `[`, 1)
+lc$Participant_ID <- gsub("H", "HEAT_", lc$Participant_ID)
+lc <- lc %>% dplyr::group_by(Participant_ID) %>%
+  dplyr::summarize(LCN2.pg.mL=mean(LCN2, na.rm=TRUE),
+            Calpro.pg.mL=mean(Calpro, na.rm=TRUE))
+lc <- lc %>% filter(Participant_ID!="BLANK")
+lc
+
+lc_meta <- full_join(lc, meta)
+
+wilcox.test(lc_meta$LCN2.pg.mL~lc_meta$fever7d_aboveavg)
+wilcox.test(lc_meta$Calpro.pg.mL~lc_meta$fever7d_aboveavg) #p=0.00314
+
+pdata <- lc_meta %>% filter(!is.na(fever7d_aboveavg))
+pdata$fever7d_aboveavg <- factor(pdata$fever7d_aboveavg, levels=c("lo", "hi"))
+
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/2G.Calpro.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=log(Calpro.pg.mL), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  scale_colour_manual(values=c("grey50", "firebrick3")) + 
+  annotate("segment", x=1, xend=2, y=12.25, yend=12.25) + 
+  annotate("text", label=c("**"), x=1.5, y=12.5, size=5) + 
+  ylab("Fecal Calprotectin (log pg/mL)") + xlab("Fever") + theme(legend.position = "none")
+p 
+#dev.off()
+
+#comparing clinical units of calpro
+#note for clinical measuremnts it would normally be expressed as µg per mg of stool #all stool at 0.2 g /mL
+lc_meta$Calpro.pg.g <- lc_meta$Calpro.pg.mL/200 #1 mL per 200 mg
+lc_meta$Calpro.µg.g <- lc_meta$Calpro.pg.g / 1000 / 1000 #pg to ng to µg 
+summary(lc_meta$Calpro.µg.g) #this seems low now that the units are I think correct.
+summary(lc_meta$Calpro.pg.g)
+
+lc <- lc %>% filter(!is.na(Calpro.pg.mL))
+
+#export for supplementary table
+lc_export <- lc_meta %>% filter(!is.na(Calpro.pg.mL) & !is.na(fever7d_aboveavg)) %>%
+  dplyr::select(Participant_ID, Calpro.pg.mL, Calpro.µg.g) 
+dim(lc_export)
+
+#write.csv(lc_export, "/ebio/abt3_projects2/uHEAT/data/SupplementalTables/S#_Calpro.csv")
+
+#compare both diet and fever
+lc_meta <- lc_meta %>% filter(!is.na(fever7d_aboveavg))
+lc_meta$Diet3 <- factor(lc_meta$Diet3, levels=c("Veg", "Omni"))
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/plots5/DietFever_Calpro.pdf")
+p <- ggplot(lc_meta, aes(x=fever7d_aboveavg, y=log(Calpro.pg.mL))) + 
+              geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  #annotate('segment', x=1, xend=2, y=6, yend=6) + 
+  #annotate('text', label=c("**"), x=1.5, y=6.2, size=5) + 
+  ggtitle("Calprotectin") + ylab("Fecal Calprotectin (pg/mL)") + xlab("Fever") +
+  facet_grid(.~Diet3)
+p
+#dev.off()
+
+#compare both IgG levels and fever (in case it's stronger in IgG-low)
+lc_meta$IgG_B1_aboveavg <- factor(lc_meta$IgG_B1_aboveavg, levels=c("lo", "hi"))
+lc_meta$fever7d_aboveavg <- factor(lc_meta$fever7d_aboveavg, levels=c("lo", "hi"))
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/0G_FeverCalpro_ByIgGLo.pdf")
+p <- ggplot(lc_meta, aes(x=fever7d_aboveavg, y=log(Calpro.pg.mL), colour=fever7d_aboveavg)) + 
+              geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  scale_colour_manual(values=c("grey60", "firebrick3")) +
+  #annotate('segment', x=1, xend=2, y=6, yend=6) + 
+  #annotate('text', label=c("**"), x=1.5, y=6.2, size=5) + 
+  ylab("Fecal Calprotectin (pg/mL)") + xlab("Fever") + theme(legend.position = "none") +
+  facet_grid(.~IgG_B1_aboveavg)
+p
+#dev.off()
+
+
+#S3G, just diet.
+wilcox.test(lc_meta$Calpro.pg.mL~lc_meta$Diet3)
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S3G_Diet_Calpro.pdf")
+p <- ggplot(lc_meta, aes(x=Diet3, y=log(Calpro.pg.mL))) + 
+              geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  annotate('segment', x=1, xend=2, y=12, yend=12) + 
+  annotate('text', label=c("p=0.12"), x=1.5, y=12.5, size=5) + 
+  ggtitle("Calprotectin") + ylab("Fecal Calprotectin (pg/mL)") + xlab("Diet")
+p
+#dev.off()
+
+
+hist(log(lc_meta$Calpro.pg.mL)) #quite normal already
+#two-way anova
+a2 <- aov(Calpro.pg.mL~fever7d_aboveavg + Diet3 + fever7d_aboveavg:Diet3, data=lc_meta) #fever is ver significant, diet not
+summary(a2)
+
+#versus: just plot via Diet.
+wilcox.test(lc_meta$Calpro.pg.mL~lc_meta$Diet3)
+
+#pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/plots5/Diet3_CholesterolRatio.pdf")
+p <- ggplot(lc_meta, aes(x=Diet3, y=log(Calpro.pg.mL))) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  annotate('segment', x=1, xend=2, y=12.5, yend=12.5) + 
+  annotate('text', label=c("p=0.12"), x=1.5, y=13) + 
+   ggtitle("Calprotectin") + xlab("Diet")
+p
+#dev.off()
+
+#Revisions - Versus antibodies.
+wilcox.test(lc_meta$Calpro.pg.mL~lc_meta$IgG_B2_aboveavg) #NS
+lc_meta$IgG_B2_aboveavg <- factor(lc_meta$IgG_B2_aboveavg, levels=c("lo", "hi"))
+
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S4#_IgG_vs_CalproELISA.pdf")
+p <- ggplot(lc_meta, aes(x=IgG_B2_aboveavg, y=log(Calpro.pg.mL))) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  annotate('segment', x=1, xend=2, y=12.5, yend=12.5) + 
+  annotate('text', label=c("p=0.59"), x=1.5, y=13) + 
+  xlab("IgG Post-Vaccine") + ylab("Fecal Calprotectin (pg/mL)")
+p
+#dev.off()
+
+cor.test(lc_meta$IgG_B2, lc_meta$Calpro.pg.mL, method='spearman')
+#for consistency show the data in international units
+lc_meta$IgG_u2 <- lc_meta$IgG_B2 * (364.5/150000)
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/0_R1_IgG2cont_vs_CalproELISA.pdf")
+p <- ggplot(lc_meta, aes(x=IgG_u2, y=Calpro.pg.mL)) + geom_point() + 
+  geom_smooth(method='lm') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  annotate('text', label=c("p=0.37\nrho=-0.07"), x=2e+06, y=100000) + 
+  xlab("IgG (mU/mL) Post-Vaccine") + ylab("Fecal Calprotectin (pg/mL)")
+p
+#dev.off()
+
+```
+
+```{r calprotectin qpcr rep 1 (pre-vaccine)}
+calpro <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/HumanCalpro_FecalFoldChangesPercDNABatch_R.csv")
+calpro
+
+calpro$cDNA_Batch <- sapply(strsplit(as.character(calpro$Batch), ".", fixed=TRUE), `[`, 1)
+
+#is there a batch effect? #batch effect is removed if I normalize CT values per plate/cDNA instead of overall
+ggplot(calpro, aes(x=as.factor(Batch), y=log(FoldChange))) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+kruskal.test(FoldChange~as.factor(Batch), data=calpro) #no batch effect
+
+ggplot(calpro, aes(x=as.factor(cDNA_Batch), y=log(FoldChange))) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+kruskal.test(FoldChange~as.factor(cDNA_Batch), data=calpro) #analyzed by cDNA batch it is very normal
+
+#which batch are the technical duplicates in?
+calpro_dups <- calpro %>% filter(duplicated(SampleID))
+calpro_dups <- calpro %>% filter(SampleID %in% calpro_dups$SampleID)
+
+#take the 'first' duplicates from batch 0 because I'm already sure that these ones correspond well with the ELISA data.
+calpro <- calpro %>% filter(!(SampleID %in% calpro_dups$SampleID & Batch!=0)) #exclude dups other than batch 0
+dim(calpro) #313 samples #now it's 361
+
+#exclude samples with non-detection (CT==40 for both technical replicates) in GAPDH, S100A9, or both
+#make sure the flags are definitely correct (I did them manually first) by redefining them in R
+calpro$ND_FLAG_G <- ifelse(calpro$CT1_G==40.00&calpro$CT2_G==40.00, "G", "")
+calpro$ND_FLAG_S <- ifelse(calpro$CT1_S==40.00&calpro$CT2_S==40.00, "S", "")
+calpro$ND_FLAG_r <- paste(calpro$ND_FLAG_G, calpro$ND_FLAG_S, sep="")
+#identical(calpro$ND_FLAG, calpro$ND_FLAG_r) #not true!
+calpro %>% filter(ND_FLAG!=ND_FLAG_r) #now there is only one left, and it should be real exclude (because of NA)
+
+calpro_filt <- calpro %>% filter(!(ND_FLAG%in%c("GS", "G")))
+dim(calpro_filt) #351, excludes 10 samples #or 305, excludes >50 #new samples, n=395
+
+#ALTERNATIVELY exclude ALL the CT 40s. New Fold changes.
+calpro$CT1_G <- ifelse(calpro$CT1_G==40, NA, calpro$CT1_G)
+calpro$CT2_G <- ifelse(calpro$CT2_G==40, NA, calpro$CT2_G)
+calpro$CT1_S <- ifelse(calpro$CT1_S==40, NA, calpro$CT1_S)
+calpro$CT2_S <- ifelse(calpro$CT2_S==40, NA, calpro$CT2_S) #BUT maybe keep cases where both S are 40, but both G are detectable? that seems real
+calpro$CT1_G <- as.numeric(calpro$CT1_G)
+calpro$CT2_G <- as.numeric(calpro$CT2_G)
+calpro$CT1_S <- as.numeric(calpro$CT1_S)
+calpro$CT2_S <- as.numeric(calpro$CT2_S)
+
+calpro$CT_G_mean <- rowMeans(calpro[,c(6:7)])
+calpro$CT_S_mean <- rowMeans(calpro[,c(8:9)])
+calpro$CT_S_mean <- ifelse(is.na(calpro$CT_S_mean)&!is.na(calpro$CT1_G)&!is.na(calpro$CT2_G)&abs(calpro$CT2_G-calpro$CT1_G)<1, 
+                              40, calpro$CT_S_mean #i.e. if there is believable GAPDH but no S100A9 detected, consider it a real 0
+                              )
+calpro %>% dplyr::select(CT1_G, CT2_G, CT_G_mean, CT1_S, CT2_S, CT_S_mean)
+calpro <- calpro %>% group_by(Batch, cDNA_Batch) %>%
+  mutate(dCT=CT_S_mean - CT_G_mean) %>%
+  mutate(dCT_mean=mean(dCT, na.rm=TRUE)) %>%
+  mutate(ddCT=dCT-dCT_mean) %>%
+  mutate(FoldChange_NEW=2^-ddCT) %>%
+  ungroup()
+calpro %>% dplyr::select(FoldChange, FoldChange_NEW) #OK, cool, that actually kind of worked. why have I been doing this in excel.
+#the only thing is I wonder if I should keep the S100A9 no signal as a real thing
+dim(calpro) #n=151 but some are NA
+summary(calpro$FoldChange)
+summary(calpro$FoldChange_NEW) #less crazy. 145 NA's.
+#calpro_filt <- calpro %>% filter(!(FoldChange>100)&!(FoldChange<0.000001))
+#calpro_filt <- calpro %>% filter(!is.na(FoldChange_NEW))
+#dim(calpro_filt) #n=140 people, so kind of similar to the fold change cutoff from before (n=147) #or n=145 with the S100A9 zeroes included
+
+
+#associate with meta
+calpro_meta <- full_join(calpro_filt, meta_seq) %>% filter(!is.na(FoldChange) & !is.na(Participant_ID))
+length(calpro_meta$SampleID) #281 valid samples #now 329 #or 319, etc. based on filtering
+dplyr::count(calpro_meta, Participant_ID) #from 47 people #now 95 #or 94 etc. based on filtering
+length(as.data.frame(dplyr::count(calpro_meta, Participant_ID))$n) #n=136 participants now
+
+#plot and test the sample 3's only.
+calpro_3 <- calpro_meta %>% filter(sample_no==3) #no joining with ELISA data. Avoid confusion.
+dim(calpro_3) #95 people as expected #updated: n=134 #now: n=145
+
+summary(calpro_3$FoldChange) #exclude craaazy fold changes over 100 or less than 0.00000? (ie 10x highest quartile or 10x lowest)
+calpro_3_filt <- calpro_3 %>% filter(!(FoldChange>100)&!(FoldChange<0.000001)) #OR: use new fold change from above which is less crazy.
+dim(calpro_3_filt) #n=137 people
+wilcox.test(calpro_3_filt$FoldChange ~ calpro_3_filt$fever7d_aboveavg) #p=0.08 :) 
+#wilcox.test(calpro_3_filt$FoldChange_NEW ~ calpro_3_filt$fever7d_aboveavg)
+
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/Fig2E_Calpro_fever7d_qPCR.pdf")
+p <- ggplot(calpro_3_filt, aes(x=fever7d_aboveavg, y=log(FoldChange), colour=fever7d_aboveavg)) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0) +
+    scale_colour_manual(values=c("grey60", "firebrick3")) +
+  annotate('segment', x=1, xend=2, y=7.2, yend=7.2) +
+  annotate('text', x=1.5, y=8, label=c("p=0.08")) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  ylab("S100A9 (Log Fold Change)") + xlab("Fever") + theme(legend.position = "none") 
+p
+#dev.off()
+
+#versus: diet.
+wilcox.test(calpro_3_filt$FoldChange ~ calpro_3_filt$Diet3) #NS
+
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2H_Calpro_Diet_qPCR.pdf")
+p <- ggplot(calpro_3_filt, aes(x=Diet3, y=log(FoldChange))) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  ylab("S100A9 (Log Fold Change)") + xlab("Diet") + theme(legend.position = "none") +
+  ggtitle("Calprotectin Pre-Vaccine") +
+  annotate('segment', x=1, xend=2, y=5, yend=5) +
+  annotate('text', x=1.5, y=5.5, label="p=0.70")
+p
+#dev.off()
+
+#make a factored version like in the others.
+calpro_3_filt$fever7d_aboveavg <- factor(calpro_3_filt$fever7d_aboveavg, levels=c("lo", "hi"))
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2H_Calpro_Diet_qPCR.pdf")
+p <- ggplot(calpro_3_filt, aes(x=fever7d_aboveavg, y=log(FoldChange))) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  facet_grid(.~Diet3) +
+  ylab("S100A9 (Log Fold Change)") + xlab("Diet") + theme(legend.position = "none") +
+  ggtitle("Calprotectin Pre-Vaccine")
+p
+#dev.off()
+
+#versus: antibodies.
+wilcox.test(calpro_3_filt$FoldChange ~ calpro_3_filt$IgG_B2_aboveavg) #p=0.06
+calpro_3_filt$IgG_B2_aboveavg <- factor(calpro_3_filt$IgG_B2_aboveavg, levels=c("lo", "hi"))
+calpro_3_filt <- calpro_3_filt %>% filter(!is.na(fever7d_aboveavg))
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S4L_CalproPre_IgG_qPCR.pdf")
+p <- ggplot(calpro_3_filt, aes(x=IgG_B2_aboveavg, y=log(FoldChange))) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  ylab("S100A9 (Log Fold Change)") + xlab("IgG Post-Vaccine") + theme(legend.position = "none") +
+  annotate("segment", x=1, xend=2, y=5, yend=5) +
+  annotate("text", x=1.5, y=5.5, label=c("p=0.067"))
+p
+#dev.off()
+
+#check by linear model controlling for covariates, including fever.
+m1 <- lm(FoldChange ~ IgG_B2_aboveavg, data=calpro_3_filt) #NS
+m2 <- lm(FoldChange ~ fever7d_aboveavg + IgG_B2_aboveavg, data=calpro_3_filt) #NS
+m3 <- lm(FoldChange ~ Age + Sex + IgG_B1 + fever7d_aboveavg + IgG_B2_aboveavg, data=calpro_3_filt) #NS
+
+
+#check over time.
+#don't take all the sample 3's for this one, i.e. only participants with more than one time point
+pdata <- calpro_meta %>% filter(!(cDNA_Batch %in% c("4", "5", "6")))
+
+#cairo_pdf(width=4, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/3I_Calpro_Time01.pdf")
+p <- ggplot(pdata, aes(x=Time01, y=log(FoldChange), colour=fever7d_aboveavg)) + 
+  #geom_point() + 
+  geom_line(aes(group=Participant_ID), alpha=0.3) +
+  geom_smooth(method='loess', fill='white', alpha=0.7) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab("Time (days)") + ylab("Log Fold Change") + 
+  ggtitle("S100A9") + labs(colour="Fever") + 
+  scale_x_continuous(breaks = (seq(-7, 7, by = 7))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) +
+  annotate('segment', x=0, xend=0, y=-3, yend=6, linetype='dashed')
+p
+#dev.off()
+
+#test statistically via mixed linear model #the same way as for beta diversity 
+m1 <- lme(FoldChange ~ seq_depth +  Bristol_Stool_Score2 + Time01 + fever7d_aboveavg + Time01*fever7d_aboveavg, random=~1|Participant_ID, data = pdata, 
+            na.action=na.exclude, method="ML")
+summary(m1) #NS
+
+```
+
+```{r calpro qPCR rep 2 & rep1 qc checks}
+calpro6a <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/HumanCalpro6_FecalFoldChanges6PercDNABatch_R.csv")
+calpro6a
+calpro6a$cDNA_Batch <- sapply(strsplit(as.character(calpro6a$Batch), ".", fixed=TRUE), `[`, 1)
+calpro6a$Rep <- c(1)
+calpro6a <- calpro6a %>% 
+  dplyr::select(SampleID, FoldChange, CT1_G, CT2_G, CT1_S, CT2_S, Rep)
+
+calpro6b <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/HumanCalpro6_FecalFoldChanges6PercDNABatch_rep2_R.csv")
+calpro6b
+calpro6b$cDNA_Batch <- sapply(strsplit(as.character(calpro6b$Batch), ".", fixed=TRUE), `[`, 1)
+calpro6b$Rep <- c(2)
+calpro6b <- calpro6b %>% 
+  dplyr::select(SampleID, FoldChange, CT1_G, CT2_G, CT1_S, CT2_S, Rep)
+
+calpro_12 <- full_join(calpro6a, calpro6b, by=c("SampleID"))
+  
+#immediate and basic check: how well do they correlate?
+p <- ggplot(calpro_12, aes(x=log(FoldChange.x), y=log(FoldChange.y))) + 
+  geom_point() +
+  geom_smooth(method='lm')
+p #not bad, not 1:1 either #updated with all samples: it's pretty good, but still messier than you'd hope for with technical reps
+
+#now: how well does either correlate with the REAL calprotectin values?
+tlr_elisa <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/ELISA_TLR_all.csv", row.names=1)
+calpro_12$Participant_ID <- sapply(strsplit(calpro_12$SampleID,"_"), `[`, 1)
+calpro_12$Participant_ID <- gsub("H", "HEAT_", calpro_12$Participant_ID)
+calpro12_meta <- calpro_12 %>% full_join(tlr_elisa) %>% filter(!(is.na(FoldChange.x)&is.na(FoldChange.y)))
+
+px <- ggplot(calpro12_meta, aes(x=log(FoldChange.x), y=log(Calpro.pg.mL))) + 
+  geom_point() +
+  geom_smooth(method='lm')
+px #terrible #updated with all samples: honestly still really terrible
+cor.test(calpro12_meta$FoldChange.x, calpro12_meta$Calpro.pg.mL, method='spearman') #rho=0.225, p=0.2 #with all samples: p=0.2, rho=0.11 (!)
+
+py <- ggplot(calpro12_meta, aes(x=log(FoldChange.y), y=log(Calpro.pg.mL))) + 
+  geom_point() +
+  geom_smooth(method='lm')
+py #terrible but slightly better
+cor.test(calpro12_meta$FoldChange.y, calpro12_meta$Calpro.pg.mL, method='spearman') #rho=0.36, p=0.05
+#the additional rep (rep 2 / y) is in fact better although it still doesn't look great
+#I used a different multichannel and non-filter tips for more pipetting accuracy
+#updated with all samples: p=0.0033, rho=0.27, so it's certainly better than the first rep although not perfect
+
+#is the COMBINATION of both reps better than either alone? either average fold change, or all ct values.
+calpro12_meta <- calpro12_meta %>%
+  rowwise() %>%
+  mutate(FoldChange_avg = mean(c(FoldChange.x, FoldChange.y), na.rm=TRUE))
+
+pxy <- ggplot(calpro12_meta, aes(x=log(FoldChange_avg), y=log(Calpro.pg.mL))) + 
+  geom_point() +
+  geom_smooth(method='lm')
+pxy #terrible
+cor.test(calpro12_meta$FoldChange_avg, calpro12_meta$Calpro.pg.mL, method='spearman') #rho=0.33, p=0.08 #so slightly worse than rep2 alone
+#with all samples: p=0.02, rho=0.22; rep 2 alone is still better.
+
+#re-calculate fold changes using all CT values?
+calpro12_meta <- calpro12_meta %>%
+  rowwise() %>%
+  mutate(CT_G_mean = mean(c(CT1_G.x, CT2_G.x, CT1_G.y, CT2_G.y), na.rm=T),
+         CT_S_mean = mean(c(CT1_S.x, CT2_S.x, CT1_S.y, CT2_S.y), na.rm=T)
+         )
+calpro12_meta %>% dplyr::select(c(CT1_G.x, CT2_G.x, CT1_G.y, CT2_G.y, CT_G_mean, CT1_S.x, CT2_S.x, CT1_S.y, CT2_S.y, CT_S_mean))
+calpro12_meta <- calpro12_meta %>% 
+  dplyr::mutate(dCT=CT_S_mean - CT_G_mean) %>%
+  dplyr::mutate(dCT_mean=mean(calpro12_meta$dCT, na.rm=TRUE)) %>%
+  dplyr::mutate(ddCT=dCT-dCT_mean) %>%
+  dplyr::mutate(FoldChange_NEW=2^-ddCT)
+
+calpro12_meta %>% dplyr::select(dCT, dCT_mean, ddCT, FoldChange.x, FoldChange.y, FoldChange_avg, FoldChange_NEW) #OK, cool, that actually kind of worked. why have I been doing this in excel.
+#it breaks unexpectedly and I don't yet understand why
+
+p <- ggplot(calpro12_meta, aes(x=log(FoldChange_NEW), y=log(Calpro.pg.mL))) + 
+  geom_point() +
+  geom_smooth(method='lm')
+p 
+cor.test(calpro12_meta$FoldChange_NEW, calpro12_meta$Calpro.pg.mL, method='spearman') #rho=0.33, p=0.07 #updated: p=0.03, rho=0.2, similar.
+
+```
+
+```{r calpro qPCR rep2 (post-vaccine) - vs fever}
+#analyze vs. fever.
+calpro6 <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/HumanCalpro6_FecalFoldChanges6PercDNABatch_rep2_R.csv")
+calpro6
+calpro6$cDNA_Batch <- sapply(strsplit(as.character(calpro6$Batch), ".", fixed=TRUE), `[`, 1)
+
+#is there a batch effect? #batch effect is removed if I normalize CT values per plate/cDNA instead of overall
+ggplot(calpro6, aes(x=as.factor(Batch), y=log(FoldChange))) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+kruskal.test(FoldChange~as.factor(Batch), data=calpro6) #no batch effect
+
+ggplot(calpro6, aes(x=as.factor(cDNA_Batch), y=log(FoldChange))) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+kruskal.test(FoldChange~as.factor(cDNA_Batch), data=calpro6) #analyzed by cDNA batch it is very normal
+
+#there are no technical duplicates
+dim(calpro6) #128 samples #note: there are some "sample 6s" in the original calpro data because some of it was longitudinal. Add these later, after filtering.
+
+#exclude samples with non-detection (CT==40 for both technical replicates) in GAPDH, S100A9, or both
+#make sure the flags are definitely correct (I did them manually first) by redefining them in R
+calpro6$ND_FLAG_G <- ifelse(calpro6$CT1_G==40.00&calpro6$CT2_G==40.00, "G", "")
+calpro6$ND_FLAG_S <- ifelse(calpro6$CT1_S==40.00&calpro6$CT2_S==40.00, "S", "")
+calpro6$ND_FLAG_r <- paste(calpro6$ND_FLAG_G, calpro6$ND_FLAG_S, sep="")
+
+calpro6_filt <- calpro6 %>% filter(!(ND_FLAG_r%in%c("GS", "G")))
+dim(calpro6_filt) #n=107 'good' samples #rep 2 : 112 'good' samples
+
+#plot and test the sample 6's only. #it's already only sample 6
+summary(calpro6_filt$FoldChange) #exclude craaazy fold changes over 100 or less than 0.00000? (ie 10x highest quartile or 10x lowest)
+summary(calpro_3$FoldChange) #the distribution is fairly similar, it still seems like a reasonable cutoff
+#therefore add the other sample 6's now, from before.
+calpro_filt$sample_no <- sapply(strsplit(calpro_filt$SampleID,"_"), `[`, 2)
+calpro6_batch1 <- calpro_filt %>% filter(sample_no==6) #calpro_filt is generated above.
+dim(calpro6_batch1) #n=44 people, i.e., the RNAseq people, plus a couple of tests.
+
+calpro6_batch1$SampleNo_Random <- NULL
+calpro6_batch1$sample_no <- NULL
+calpro6_batch1$Batch <- paste("Batch1", calpro6_batch1$Batch, sep="_")
+calpro6_filt$Batch <- paste("Batch2", calpro6_filt$Batch, sep="_")
+identical(names(calpro6_filt), names(calpro6_batch1))
+calpro6.2 <- rbind(calpro6_filt, calpro6_batch1)
+dim(calpro6.2) #n=151 #updated: n=156
+
+#ALTERNATIVELY exclude ALL the CT 40s. New Fold changes.
+calpro6.2$CT1_G <- ifelse(calpro6.2$CT1_G==40, NA, calpro6.2$CT1_G)
+calpro6.2$CT2_G <- ifelse(calpro6.2$CT2_G==40, NA, calpro6.2$CT2_G)
+calpro6.2$CT1_S <- ifelse(calpro6.2$CT1_S==40, NA, calpro6.2$CT1_S)
+calpro6.2$CT2_S <- ifelse(calpro6.2$CT2_S==40, NA, calpro6.2$CT2_S) #BUT maybe keep cases where both S are 40, but both G are detectable? that seems real
+calpro6.2$CT1_G <- as.numeric(calpro6.2$CT1_G)
+calpro6.2$CT2_G <- as.numeric(calpro6.2$CT2_G)
+calpro6.2$CT1_S <- as.numeric(calpro6.2$CT1_S)
+calpro6.2$CT2_S <- as.numeric(calpro6.2$CT2_S)
+
+calpro6.2$CT_G_mean <- rowMeans(calpro6.2[,c(5:6)])
+calpro6.2$CT_S_mean <- rowMeans(calpro6.2[,c(7:8)])
+calpro6.2$CT_S_mean <- ifelse(is.na(calpro6.2$CT_S_mean)&!is.na(calpro6.2$CT1_G)&!is.na(calpro6.2$CT2_G)&abs(calpro6.2$CT2_G-calpro6.2$CT1_G)<1, 
+                              40, calpro6.2$CT_S_mean #i.e. if there is believable GAPDH but no S100A9 detected, consider it a real 0
+                              )
+calpro6.2 %>% dplyr::select(CT1_G, CT2_G, CT_G_mean, CT1_S, CT2_S, CT_S_mean)
+calpro6.2 <- calpro6.2 %>% group_by(Batch, cDNA_Batch) %>%
+  mutate(dCT=CT_S_mean - CT_G_mean) %>%
+  mutate(dCT_mean=mean(dCT, na.rm=TRUE)) %>%
+  mutate(ddCT=dCT-dCT_mean) %>%
+  mutate(FoldChange_NEW=2^-ddCT) %>%
+  ungroup()
+calpro6.2 %>% dplyr::select(FoldChange, FoldChange_NEW) #OK, cool, that actually kind of worked. why have I been doing this in excel.
+#the only thing is I wonder if I should keep the S100A9 no signal as a real thing
+dim(calpro6.2) #n=151 but some are NA
+summary(calpro6.2$FoldChange)
+summary(calpro6.2$FoldChange_NEW) #honestly similar. 22 NA's.
+#calpro6.2_filt <- calpro6.2 %>% filter(!(FoldChange>100)&!(FoldChange<0.000001))
+calpro6.2_filt <- calpro6.2 %>% filter(!is.na(FoldChange_NEW))
+#dim(calpro6.2_filt) #n=140 people, so kind of similar to the fold change cutoff from before (n=147) #or n=145 with the S100A9 zeroes included
+
+#associate with meta
+calpro6_meta <- full_join(calpro6.2_filt, meta_seq) %>% filter(!is.na(FoldChange) & !is.na(Participant_ID))
+length(calpro6_meta$SampleID) #n=140
+dplyr::count(calpro6_meta, Participant_ID) #n=140
+
+#summarize per person for any duplicates
+calpro6_meta <- calpro6_meta %>% group_by(Participant_ID, fever7d_aboveavg) %>%
+  summarize(FoldChange=mean(FoldChange), FoldChange_NEW=mean(FoldChange_NEW))
+dim(calpro6_meta) #n=139 #updated: n=148 or 150
+
+#test vs. fever
+dim(calpro6_meta)
+wilcox.test(calpro6_meta$FoldChange ~ calpro6_meta$fever7d_aboveavg) #p=0.3 #updated: p=0.07 if we exclude double 40's
+wilcox.test(calpro6_meta$FoldChange_NEW ~ calpro6_meta$fever7d_aboveavg) #very similar, 0.07 with the alternative way of calculating
+calpro6_meta$fever7d_aboveavg <- factor(calpro6_meta$fever7d_aboveavg, levels=c("lo", "hi"))
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/calpro6b_fever7d_qPCR.pdf")
+p <- ggplot(calpro6_meta, aes(x=fever7d_aboveavg, y=log(FoldChange), colour=fever7d_aboveavg)) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0) +
+    scale_colour_manual(values=c("grey50", "firebrick3")) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  ylab("S100A9 (Log Fold Change)") + xlab("Fever") + theme(legend.position = "none") +
+  annotate('segment', x=1, xend=2, y=6, yend=6) +
+  annotate('text', x=1.5, y=6.5, label=c("p=0.07"))
+p
+#dev.off()
+
+#sample 6 vs sample 3: any meaningful change over time.?
+calpro6.2_filt$Participant_ID <- sapply(strsplit(calpro6.2_filt$SampleID,"_"), `[`, 1)
+calpro6.2_filt$Participant_ID <- gsub("H", "HEAT_", calpro6.2_filt$Participant_ID)
+
+
+calpro_6_vs_3 <- calpro_3_filt %>% dplyr::select(any_of(names(calpro)), Participant_ID) %>%
+  full_join(calpro6.2_filt, by=c("Participant_ID"))
+calpro_6_vs_3 %>% dplyr::select(Participant_ID, SampleID.x, SampleID.y, FoldChange.x, FoldChange.y)
+
+
+p <- ggplot(calpro_6_vs_3, aes(x=log(FoldChange.x), y=log(FoldChange.y))) + geom_point() +
+  geom_smooth(method='lm')
+p #correlation exists but is not strong
+cor.test(calpro_6_vs_3$FoldChange.x, calpro_6_vs_3$FoldChange.y, method='spearman') #p=0.03, rho=0.2
+
+#vs: plot per person 
+calpro_6_join <- calpro6.2_filt %>% dplyr::select(SampleID, FoldChange, Participant_ID)
+calpro_3_join <- calpro_3_filt %>% dplyr::select(SampleID, FoldChange, Participant_ID)
+pdata <- Reduce(full_join, list(calpro_6_join, calpro_3_join, meta_seq)) %>%
+  filter(sample_no %in% c(3, 6))
+pdata$Time_to_Vaccine <- ifelse(pdata$sample_no==3, "Pre", "Post")
+pdata$Time_to_Vaccine <- factor(pdata$Time_to_Vaccine, levels=c("Pre", "Post"))
+
+pdata$fever7d_aboveavg <- factor(pdata$fever7d_aboveavg, levels=c("lo", "hi"))
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S100A9_Fever_Time.pdf")
+p <- ggplot(pdata, aes(x=Time_to_Vaccine, y=log(FoldChange))) + 
+  geom_boxplot() +
+  geom_point() +
+  geom_line(aes(group=Participant_ID), alpha=0.4) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  facet_grid(.~fever7d_aboveavg) + 
+  ylab("S100A9 (Log Fold Change)") + xlab("Time Relative to Vaccine") +
+  annotate("segment", x=1, xend=2, y=5.5, yend=5.5) +
+  annotate("text", x=1.5, y=6, label=c("ns"))
+p
+#dev.off()
+#no difference, great.
+#double check statistically.
+pdata_lo <- pdata %>% filter(fever7d_aboveavg=="lo")
+pdata_hi <- pdata %>% filter(fever7d_aboveavg=="hi")
+pdata_lo %>% filter(!is.na(FoldChange)) %>% dplyr::count(Participant_ID) %>% as.data.frame()
+wilcox.test(pdata_lo$FoldChange~pdata_lo$Time_to_Vaccine) #p=0.95
+pdata_hi %>% filter(!is.na(FoldChange)) %>% dplyr::count(Participant_ID) %>% as.data.frame()
+wilcox.test(pdata_hi$FoldChange~pdata_hi$Time_to_Vaccine) #p=0.84
+
+#check each sample 3 and sample 6 by diet and by IgG1
+pdata_3 <- pdata %>% filter(sample_no==3)
+pdata_6 <- pdata %>% filter(sample_no==6)
+wilcox.test(pdata_3$FoldChange ~ pdata_3$Diet3) #p=0.7 as it should be (from before)
+wilcox.test(pdata_6$FoldChange ~ pdata_6$Diet3) #p=0.20 more similar to the ELISA data
+wilcox.test(pdata_3$FoldChange ~ pdata_3$IgG_B2_aboveavg) #p=0.067 same as before
+cor.test(pdata_3$FoldChange, pdata_3$IgG_B2, method='spearman') #p=0.09, rho=-0.144 #continuous as requested by reviewer
+wilcox.test(pdata_6$FoldChange ~ pdata_6$IgG_B2_aboveavg) #p=0.89
+cor.test(pdata_6$FoldChange, pdata_6$IgG_B2, method='spearman') #p=0.37, rho=-0.07 #continuous as requested by reviewer
+
+#plot these data for Fig S4
+pdata_6$Diet3 <- factor(pdata_6$Diet3, levels=c("Veg", "Omni"))
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S100A9Post_Diet_qPCR.pdf")
+p <- ggplot(pdata_6, aes(x=Diet3, y=log(FoldChange))) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  ylab("S100A9 (Log Fold Change)") + xlab("Diet") + theme(legend.position = "none") +
+  annotate('segment', x=1, xend=2, y=5.5, yend=5.5) +
+  annotate('text', x=1.5, y=6, label="p=0.20")
+p
+#dev.off()
+
+#for consistency with the other plots, adjust IgG levels to the international units.
+pdata_3$IgG_u2 <- pdata_3$IgG_B2 * (364.5/150000)
+#cairo_pdf(width=3.5, height=3.5, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S100A9Pre_IgGB2_qPCR.pdf")
+p <- ggplot(pdata_3, aes(x=IgG_u2, y=log(FoldChange))) +
+  geom_point() +
+  geom_smooth(method='lm') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  ylab("S100A9 (Log Fold Change) Pre-Vaccine") + xlab("IgG (mU/mL) Post-Vaccine") +
+  annotate("text", x=2e+06, y=-5, label=c("p=0.09\nrho=-0.14"), hjust=0)
+p
+#dev.off()
+
+pdata_3$IgG_B2_aboveavg <- factor(pdata_3$IgG_B2_aboveavg, levels=c("lo", "hi"))
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S100A9Pre_IgGB2aboveavg_qPCR.pdf")
+p <- ggplot(pdata_3, aes(x=IgG_B2_aboveavg, y=log(FoldChange))) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  ylab("S100A9 (Log Fold Change) Pre") + xlab("IgG Post-Vaccine") +
+  annotate('segment', x=1, xend=2, y=5.5, yend=5.5) +
+  annotate('text', x=1.5, y=6, label="p=0.066")
+p
+#dev.off()
+wilcox.test(pdata_3$FoldChange~pdata_3$IgG_B2_aboveavg) #p=0.066
+
+#for consistency with the other plots, adjust IgG levels to the international units.
+pdata_6$IgG_u2 <- pdata_6$IgG_B2 * (364.5/150000)
+#cairo_pdf(width=3.5, height=3.5, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S100A9Post_IgGB2_qPCR.pdf")
+p <- ggplot(pdata_6, aes(x=IgG_u2, y=log(FoldChange))) +
+  geom_point() +
+  geom_smooth(method='lm') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  ylab("S100A9 (Log Fold Change) Post-Vaccine") + xlab("IgG (mU/mL) Post-Vaccine") +
+  annotate("text", x=2e+06, y=-5, label=c("p=0.37\nrho=-0.08"), hjust=0)
+p
+#dev.off()
+
+pdata_6$IgG_B2_aboveavg <- factor(pdata_6$IgG_B2_aboveavg, levels=c("lo", "hi"))
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S100A9Post_IgGB2aboveavg_qPCR.pdf")
+p <- ggplot(pdata_6, aes(x=IgG_B2_aboveavg, y=log(FoldChange))) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  ylab("S100A9 (Log Fold Change) Post") + xlab("IgG Post-Vaccine") +
+  annotate('segment', x=1, xend=2, y=5.5, yend=5.5) +
+  annotate('text', x=1.5, y=6, label="p=0.89")
+p
+#dev.off()
+wilcox.test(pdata_6$FoldChange~pdata_6$IgG_B2_aboveavg) #p=0.89
+
+#does the avg across samples work better by reducing noise?
+pdata2 <- pdata %>% group_by(Participant_ID) %>% #summarize across time points
+  summarize(FoldChange=mean(FoldChange)) %>%
+  full_join(meta) #regain metadata
+p <- ggplot(pdata2, aes(x=fever7d_aboveavg, y=log(FoldChange))) + geom_boxplot() +
+  geom_jitter(width=0.1, height=0) 
+p
+wilcox.test(pdata2$FoldChange ~ pdata2$fever7d_aboveavg) #p=0.008 #yes! especially if NAs are excluded entirely (rather than averaged)
+pdata2 %>% filter(!is.na(FoldChange)) %>% dim()
+pdata2$fever7d_aboveavg <- factor(pdata2$fever7d_aboveavg, levels=c("lo", "hi"))
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/calpro_qPCRavg_fever7d.pdf")
+p <- ggplot(pdata2, aes(x=fever7d_aboveavg, y=log(FoldChange), colour=fever7d_aboveavg)) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0) +
+    scale_colour_manual(values=c("grey50", "firebrick3")) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  ylab("S100A9 (Log Fold Change)") + xlab("Fever") + theme(legend.position = "none") +
+  annotate('segment', x=1, xend=2, y=5, yend=5) +
+  annotate('text', x=1.5, y=5.5, label=c("**"))
+p
+#dev.off()
+
+#also check by diet and antibody levels for Fig S(4)
+wilcox.test(pdata2$FoldChange ~ pdata2$Diet3) #p=0.58
+wilcox.test(pdata2$FoldChange ~ pdata2$IgG_B2_aboveavg) #p=0.45
+cor.test(pdata2$FoldChange, pdata2$IgG_B2, method='spearman') #p=0.48, rho=-0.07
+
+#and how does the average compare to real calprotectin levels measured via ELISA?
+tlr_elisa <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/ELISA_TLR_all.csv", row.names=1)
+pdata2b <- pdata2 %>% full_join(tlr_elisa) %>% filter(!is.na(Age))
+
+p <- ggplot(pdata2b, aes(x=Calpro.pg.mL, y=log(FoldChange))) + geom_point() +
+  geom_smooth(method='lm')
+p
+cor.test(pdata2b$Calpro.pg.mL, pdata2b$FoldChange, method='spearman') #p=0.029, rho=0.22
+
+#versus sample 3, just to remind myself:
+pdata3 <- calpro_3_join %>% full_join(tlr_elisa) %>% filter(!(is.na(FoldChange)))
+
+p <- ggplot(pdata3, aes(x=Calpro.pg.mL, y=log(FoldChange))) + geom_point() +
+  geom_smooth(method='lm')
+p
+cor.test(pdata3$Calpro.pg.mL, pdata3$FoldChange, method='spearman') #p=0.06, rho=0.17
+
+#whereas sample 6 was
+pdata6 <- calpro_6_join %>% full_join(tlr_elisa) %>% filter(!(is.na(FoldChange)))
+p <- ggplot(pdata6, aes(x=Calpro.pg.mL, y=log(FoldChange))) + geom_point() +
+  geom_smooth(method='lm')
+p
+cor.test(pdata6$Calpro.pg.mL, pdata6$FoldChange, method='spearman') #p=0.003, rho=0.27 #much better really.
+
+#actual calpro vs. IgGB2 continuous, for reviewer.
+#cairo_pdf(width=3.5, height=3.5, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/calpro_ELISA_IgGB2.pdf")
+p <- ggplot(pdata2b, aes(x=IgG_B2, y=Calpro.pg.mL)) + geom_point() +
+  geom_smooth(method='lm') +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) +
+  ylab("Calprotectin (pg/mL)") + xlab("IgG (U/mL) Post-Vaccine") +
+  annotate("text", x=8e+08, y=100000, label=c("p=0.37\nrho=-0.07"), hjust=0)
+p
+#dev.off()
+cor.test(pdata2b$Calpro.pg.mL, pdata2b$IgG_B2, method='spearman') #p=0.36, rho=-0.07
+
+
+#OK. how about a nice mixed linear model comparing normalized levels of calpro at all 3 timepoints per person.
+mdata <- pdata %>% dplyr::select(Participant_ID, SampleID, sample_no, fever7d_aboveavg, FoldChange)
+tlr_elisa$SampleID <- paste(gsub("HEAT_", "H", tlr_elisa$Participant_ID), "7", sep="_")
+mdata <- tlr_elisa %>% dplyr::select(Participant_ID, SampleID, Calpro.pg.mL) %>% full_join(mdata)
+mdata[order(mdata$Participant_ID),]
+#centre and scale each measurement so they are comparable between people.
+mdata <- mdata %>% mutate(Calpro.pg.mL_scaled=scale(Calpro.pg.mL),
+                          FoldChange_scaled=scale(FoldChange))
+mdata$Calprotectin <- ifelse(is.na(mdata$FoldChange), yes=mdata$Calpro.pg.mL, no=mdata$FoldChange)
+mdata <- mdata %>% dplyr::select(-c(fever7d_aboveavg, sample_no)) %>% full_join(meta)
+mdata$sample_no <- sapply(strsplit(mdata$SampleID,"_"), `[`, 2)
+
+m1 <- lme(Calprotectin ~ fever7d_aboveavg, random=~1|Participant_ID, data = mdata, 
+            na.action=na.exclude, method="ML")
+summary(m1) #p=0.03
+
+#additionally ctrl for things for reviewer 3
+m1 <- lme(Calprotectin ~ Sex + Age + IgG_B1 + fever7d_aboveavg, random=~1|Participant_ID, data = mdata, 
+            na.action=na.exclude, method="ML")
+summary(m1) #p=0.03
+
+#and if we exclude sample 6, to drive home the sample 3 value?
+mdata2 <- mdata %>% filter(sample_no!="6")
+
+m2 <- lme(Calprotectin ~ fever7d_aboveavg, random=~1|Participant_ID, data = mdata2, 
+            na.action=na.exclude, method="ML")
+summary(m2) #p=0.047
+
+dim(mdata)
+
+
+```

@@ -1,0 +1,1408 @@
+---
+title: "CHILD_analysis"
+author: "Kelsey Huus"
+date: "2025-10-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+##Packages
+library(dplyr)
+library(ggplot2)
+#library(data.table)
+library(tidyr)
+library(nlme)
+
+```
+
+```{r process input}
+#quickly process the samples.txt file into 4 batches
+samples <- read.delim("/ebio/abt3_projects2/CHILD_uHEAT/data/raw_data/samples.txt")
+length(samples$Sample) #8722 samples (!! wild)
+runs <- dplyr::count(samples, Run) %>% as.data.frame()
+batch1 <- runs$Run[1:10]
+batch2 <- runs$Run[11:20]
+batch3 <- runs$Run[21:30]
+batch4 <- runs$Run[31:38]
+
+samples1 <- samples %>% filter(Run %in% batch1)
+samples2 <- samples %>% filter(Run %in% batch2)
+samples3 <- samples %>% filter(Run %in% batch3)
+samples4 <- samples %>% filter(Run %in% batch4)
+
+write.table(samples1, "/ebio/abt3_projects2/CHILD_uHEAT/data/raw_data/samples_batch1.txt", quote=FALSE, 
+            sep="\t", row.names=FALSE)
+write.table(samples2, "/ebio/abt3_projects2/CHILD_uHEAT/data/raw_data/samples_batch2.txt", quote=FALSE, 
+            sep="\t", row.names=FALSE)
+write.table(samples3, "/ebio/abt3_projects2/CHILD_uHEAT/data/raw_data/samples_batch3.txt", quote=FALSE, 
+            sep="\t", row.names=FALSE)
+write.table(samples4, "/ebio/abt3_projects2/CHILD_uHEAT/data/raw_data/samples_batch4.txt", quote=FALSE, 
+            sep="\t", row.names=FALSE)
+
+```
+
+```{r read_braken}
+#' Function for reading in a bracken taxonomy table
+#'
+#' The table will be converted to long form (sample ~ abundance).
+#' Only "_frac" or "_num" columns will be kept (see "keep_frac").
+#' Taxonomy will be split into separate levels (see "tax_levs").
+#' tidytable (w/ data.table) used to speed the process up.
+#'
+#' @param infile Path to bracken table file
+#' @param nrows Number of table rows to read. If Inf, all lines will be read.
+#' @param keep_frac If TRUE, keep all columns ending in "_frac"; otherwise, keep "_num" columns.
+#' @param tax_levs Taxonomic levels to separate the taxonomy column into.
+#' @param ... Params passed to fread()
+#' @return data.table
+#' @export
+#' @import tidytable
+#' @importFrom data.table fread
+#' 
+read_bracken = function(infile, nrows=Inf, keep_frac=TRUE,
+                        tax_levs = c('Domain', 'Phylum', 'Class', 'Order',
+                                     'Family', 'Genus', 'Species'),
+                        nThread = 4, ...){
+  if(keep_frac){
+    to_rm = '_num'
+    to_keep = '_frac'
+  } else {
+    to_rm = '_frac'
+    to_keep = '_num'
+  }
+  dt = data.table::fread(infile, sep='\t', nrows=nrows, check.names=TRUE,
+                         nThread=nThread, ...) %>%
+    tidytable::select(-taxIDs, -ends_with(!!to_rm)) %>%
+    tidytable::mutate(taxonomy = gsub(';[pcofgs]__', ';', taxonomy),
+                       taxonomy = gsub('^d__', '', taxonomy)) %>%
+    tidytable::separate(taxonomy, tax_levs, sep=';') %>%
+    tidytable::pivot_longer(cols=ends_with(!!to_keep),
+                               names_to='Sample',
+                               values_to='Abundance') %>%
+    tidytable::mutate(Sample = gsub('(_frac|_num)$', '', Sample))
+
+  return(dt)
+}
+
+```
+
+```{r child metadata}
+meta1 <- read.csv("/ebio/abt3_projects2/CHILD_uHEAT/data/metadata/CHILDCOVID19AddonStudy-AdultSelfReport1_DATA_2025-03-27.csv")
+dim(meta1) #n=2567
+#duplicated(meta1$study_id) #no, all clean
+meta1$cv19a1_date #Aug to Sept 2021
+dplyr::count(meta1,cv19a1_vac) %>% mutate(per=n/sum(n)*100) #~60% of people have received one dose of vaccine
+dplyr::count(meta1,cv19a1_vacdose) %>% mutate(per=n/sum(n)*100) #mostly 2 doses
+dplyr::count( meta1, cv19a1_vaceffects_yn) %>% mutate(per=n/sum(n)*100) #44% had side effects
+dplyr::count(meta1,cv19a1_vaceffects_list___3) %>% mutate(per=n/sum(n)*100) #~19% had fever or chills
+
+##additional data: participant age, sex, timepoint
+child_age <- read.csv("/ebio/abt3_projects2/CHILD_uHEAT/data/metadata/CP190_COVID_Survey_Completion_Age.csv")
+child_sex <- read.csv("/ebio/abt3_projects2/CHILD_uHEAT/data/metadata/CP190_COVID_Participant_Sex_Gender.csv")
+child_time <- read.csv("/ebio/abt3_projects2/CHILD_uHEAT/data/metadata/CP190_COVID_Stool_Sample_Collection_Date.csv")
+
+#meta1 <- child_age %>% dplyr::select(study_id, cv19a1_age) %>% 
+#  full_join(meta1) #???
+#meta1$Sex <- substr(meta1$study_id,7, 7)
+#meta1_adults <-  meta1 %>% filter(meta1$cv19a1_age>=18)
+#summary(meta1_adults$cv19a1_age) #18 to 85
+#dim(meta1_adults) #n=2514
+#meta1_young_adults <- meta1 %>% filter(meta1$cv19a1_age>=18 & meta1$cv19a1_age<=40)
+#summary(meta1_young_adults$cv19a1_age) #18 to 40, as defined
+#dim(meta1_young_adults) #n=487
+
+#actually: this metadata contains everything extra (Age/sex/timing/serology) and seems more useful
+meta_extra <- read.delim("/ebio/abt3_projects2/CHILD_uHEAT/data/metadata/15510_20250815-091140_child_metadata.txt")
+names(meta_extra)
+meta_extra$BMI <- as.numeric(meta_extra$cv19_2_weightkg) / ((as.numeric(meta_extra$cv19_2_heightcm)/100)^2)
+summary(meta_extra$BMI) #most of them are normal ish but there are some very weird ones
+meta_extra$BMI_cat <- case_when(meta_extra$BMI<18.5 ~ "<18.5",
+                                   meta_extra$BMI>=18.5 & meta_extra$BMI <25 ~ "18.5-25",
+                                   meta_extra$BMI>=25 & meta_extra$BMI <30 ~ "25-30",
+                                   meta_extra$BMI>=30 & meta_extra$BMI <35 ~ "30-35",
+                                   meta_extra$BMI>=35 & meta_extra$BMI <40 ~ "35-40",
+                                   meta_extra$BMI>=35 ~ "40+"
+                                   )
+
+
+meta_extra$age <- as.numeric(meta_extra$age)
+meta_extra$Age_cat <- case_when(meta_extra$age<18 ~ "<18",
+                                    meta_extra$age>=18&meta_extra$age<30 ~ "18-30",
+                                    meta_extra$age>=30&meta_extra$age<40 ~ "30-40",
+                                    meta_extra$age>=40&meta_extra$age<50 ~ "40-50",
+                                    meta_extra$age>=50&meta_extra$age<65 ~ "50-65",
+                                    meta_extra$age>=65 ~ "65+"
+                                    )
+cols_to_keep <- names(meta_extra)[c(6:9, 13:20,2970:3015, grep("healthcon", names(meta_extra)))]
+meta_extra <- meta_extra %>% dplyr::select(all_of(cols_to_keep))
+#plus SEQ ID (!) so that the fecal sample dates are accurate
+meta_extra$SeqID <- paste("X15510", meta_extra$sample_name_accessiom, sep="_")
+meta_extra$SeqID <- gsub(".", "_", meta_extra$SeqID, fixed=TRUE)
+
+meta1 <- meta_extra %>% 
+  dplyr::select(-c(redcap_event_name)) %>%
+  full_join(meta1)
+
+meta1_adults <-  meta1 %>% filter(meta1$age>=18)
+summary(meta1_adults$age) #18 to 74
+dim(meta1_adults) #n=2231
+meta1_young_adults <- meta1 %>% filter(meta1$age>=18 & meta1$age<=40)
+summary(meta1_young_adults$age) #18 to 40, as defined
+dim(meta1_young_adults) #n=531
+
+#parse fecal & blood sampling relative to time of vaccination.
+head(meta1$collection_date) #the date the stool was collected YYYY-MM-DD
+head(meta1$serology_sample_collection_date) #the date the blood was collected MM/DD/YY
+head(meta1$cv19a1_vacdosedate1) #the date of dose 1 YYYY-MM-DD
+head(meta1$cv19a1_vacdosedate2) #the date of dose 2 YYYY-MM-DD
+
+#convert dates to continuous time function post-pandemic as per µHEAT dates ; YYYY-MM-DD
+date_to_days <- function(x) {years <- strsplit(x, "-")[[1]][1]
+years <- ifelse(years=="2021", yes=0, no=1) #assuming no=2022 
+months <- strsplit(x, "-")[[1]][2]
+days <- strsplit(x, "-")[[1]][3]
+days2 <- as.numeric(years)*365 + as.numeric(months)*30 + as.numeric(days)
+return(days2)
+}
+meta1$fecal_date_days <- sapply(meta1$collection_date, date_to_days)
+meta1$dose1_date_days <- sapply(meta1$cv19a1_vacdosedate1, date_to_days)
+meta1$dose2_date_days <- sapply(meta1$cv19a1_vacdosedate2, date_to_days)
+
+date_to_days2 <- function(x) {years <- strsplit(x, "/")[[1]][3]
+years <- ifelse(years=="21", yes=0, no=1) #assuming no=2022 
+months <- strsplit(x, "/")[[1]][1]
+days <- strsplit(x, "/")[[1]][2]
+days2 <- as.numeric(years)*365 + as.numeric(months)*30 + as.numeric(days)
+return(days2)
+}
+
+meta1$blood_date_days <- sapply(meta1$serology_sample_collection_date, date_to_days2)
+
+#now: parse before/after. 
+meta1$fecal_relative_to_vaccine <- case_when(meta1$fecal_date_days<meta1$dose1_date_days ~ "BeforeDose1",
+                                             meta1$fecal_date_days>=meta1$dose1_date_days & meta1$fecal_date_days<meta1$dose2_date_days~ "BeforeDose2",
+                                             meta1$fecal_date_days>=meta1$dose2_date_days ~ "AfterDose2")
+
+meta1 %>% dplyr::select(SeqID, study_id, fecal_relative_to_vaccine) #ok cool
+
+meta1$blood_relative_to_vaccine <- case_when(meta1$blood_date_days<meta1$dose1_date_days ~ "BeforeDose1",
+                                             meta1$blood_date_days>=meta1$dose1_date_days & meta1$blood_date_days<meta1$dose2_date_days~ "BeforeDose2",
+                                             meta1$blood_date_days>=meta1$dose2_date_days &  meta1$blood_date_days<(meta1$dose2_date_days + 14)~ "AfterDose2",
+                                             meta1$blood_date_days>=(meta1$dose2_date_days + 14) ~ "AfterDose2_2wks"
+                                             )
+
+meta1$blood_days_since_vaccine <- case_when(meta1$blood_relative_to_vaccine=="BeforeDose2" ~ meta1$blood_date_days - meta1$dose1_date_days,
+                                            meta1$blood_relative_to_vaccine=="AfterDose2"|meta1$blood_relative_to_vaccine=="AfterDose2_2wks" ~ meta1$blood_date_days - meta1$dose2_date_days)
+summary(meta1$blood_days_since_vaccine)
+
+```
+
+```{r seq depth}
+#I could filter based on sequencing depth, if there are indeed some shallow-sequenced test samples
+seq_stats1 <- read.delim("/ebio/abt3_projects2/CHILD_uHEAT/data/QC/batch1/reports/final/seqkit_stats.tsv")
+summary(seq_stats1$num_seqs)
+hist(seq_stats1$num_seqs) #hm.
+seq_stats2 <- read.delim("/ebio/abt3_projects2/CHILD_uHEAT/data/QC/batch2/reports/final/seqkit_stats.tsv")
+seq_stats3 <- read.delim("/ebio/abt3_projects2/CHILD_uHEAT/data/QC/batch3/reports/final/seqkit_stats.tsv")
+seq_stats4 <- read.delim("/ebio/abt3_projects2/CHILD_uHEAT/data/QC/batch4/reports/final/seqkit_stats.tsv")
+
+seq_stats <- Reduce(rbind, list(seq_stats1, seq_stats2, seq_stats3, seq_stats4))
+hist(log(seq_stats$num_seqs)) #indeed there are kinda 2 distributions (1 shallow run, 1 deep)
+seq_stats$study_id <- sapply(strsplit(seq_stats$Sample,"_"), `[`, 2)
+seq_stats$unknown_idAB <- sapply(strsplit(seq_stats$Sample,"_"), `[`, 3)
+hist(log(seq_stats[which(seq_stats$unknown_idAB=="A"),]$num_seqs)) #still 2 distributions
+hist(log(seq_stats[which(seq_stats$unknown_idAB=="B"),]$num_seqs)) #still 2 distributions
+
+#OK so for each duplicate, just select the one with higher reads. OK?
+seq_stats <- seq_stats %>% filter(Read==1) #one read only to make it less complicated for dups
+duplicated(seq_stats$study_id) #not all, but many #but there are SUPPOSED to be 2 samples per person
+duplicated(seq_stats$Sample) #whereas the samples are not duplicated
+seq_stats <- seq_stats %>%
+  # For each biological sample, order the duplicates and assign dup1, dup2, etc
+  group_by(study_id) %>%
+  arrange(num_seqs, .by_group = TRUE) %>%
+  mutate(dup_id = paste0("dup", row_number())) %>%
+  ungroup()
+seq_stats_dup1 <- seq_stats %>% filter(dup_id=="dup1")
+seq_stats_dup2 <- seq_stats %>% filter(dup_id=="dup2")
+hist(log(seq_stats_dup1$num_seqs)) #nope still 2 distributions
+hist(log(seq_stats_dup2$num_seqs)) #argh
+#but like maybe they are different time points? I have NO idea
+#now: order it by seq depth, and take the higher one always.
+
+
+
+#OK, if there are less than 10 000 reads we just kick it out. #upped to 20 000
+hist(log(seq_stats$num_seqs))
+seq_stats_deep <- seq_stats %>% filter(num_seqs>20000) 
+dim(seq_stats_deep) #n=5000
+
+seq_stats_deep <- seq_stats_deep %>% rename(SeqID = Sample)
+seq_stats_deep$SeqID <- paste("X", seq_stats_deep$SeqID, sep="") #because in brk cls there is an X
+
+hist(log(seq_stats_deep$num_seqs))
+summary(seq_stats_deep$num_seqs)
+
+#add sequencing depth to the metadata.
+meta1 <- meta1 %>% full_join(seq_stats_deep) #this creates some duplicates though...
+
+#since my current approach based on abundance was to AVERAGE the abundance across both sequencing reps (for the remaining duplicates), also combine the seq depth by adding it
+meta1 <- meta1 %>% group_by(SeqID) %>%
+  mutate(seq_depth=sum(num_seqs)) %>%
+  ungroup() %>%
+  filter(!is.na(SeqID)&!duplicated(SeqID))
+
+```
+
+```{r import brk all batches}
+#read in the brk_cls file
+##Read Files - rel abund
+
+# listing files
+brk_cls_files = c('/ebio/abt3_projects2/CHILD_uHEAT/data/LLMGP/batch1/kraken/all-combined-bracken.tsv',
+                  '/ebio/abt3_projects2/CHILD_uHEAT/data/LLMGP/batch2/kraken/all-combined-bracken.tsv',
+                 '/ebio/abt3_projects2/CHILD_uHEAT/data/LLMGP/batch3/kraken/all-combined-bracken.tsv', 
+                 '/ebio/abt3_projects2/CHILD_uHEAT/data/LLMGP/batch4/kraken/all-combined-bracken.tsv')
+brk_cls_files %>% length()
+# reading tables #takes a while for all batches
+brk_cls = brk_cls_files %>%
+  plyr::llply(read_bracken) %>%
+  data.table::rbindlist(use.names=TRUE, idcol='dataset')
+brk_cls
+names(brk_cls)
+
+#keep a tax table
+tax <- brk_cls %>% dplyr::select(Domain, Phylum, Class, Order, Family, Genus, Species, taxonomy_id) %>%
+  filter(!duplicated(taxonomy_id))
+#write.csv(tax, "/ebio/abt3_projects2/uHEAT/data/output_kraken_all/kraken/tax_table.csv")
+
+#immediately filter to only contain valid adult id's
+brk_cls_ids <- dplyr::count(brk_cls, Sample) %>% as.data.frame()
+#grep("LH", brk_cls_ids$Sample) #Charisse said this denotes a real run but that info is somewhere else
+#also some of them have "A" and "B", what does this mean?
+brk_cls_ids$study_id <- sapply(strsplit(brk_cls_ids$Sample,"_"), `[`, 2) #so this part is equivalent I think
+meta1$study_id
+brk_cls_ids$run_id <- sapply(strsplit(brk_cls_ids$Sample,"_"), `[`, 1)
+brk_cls_ids$unknown_idAB <- sapply(strsplit(brk_cls_ids$Sample,"_"), `[`, 3)
+brk_cls_ids$unknown_id <- sapply(strsplit(brk_cls_ids$Sample,"_"), `[`, 4)
+#dplyr::count(brk_cls_ids, unknown_id) #FW1, FW2, and some numbers
+#dplyr::count(brk_cls_ids, unknown_idAB) #A, B, or CHILD
+
+#instead of changing the brk_cls ids, include the long strings in the metadata, because it will be faster
+brk_cls_ids <- brk_cls_ids %>% rename(SeqID = Sample) %>% dplyr::select(-c(n))
+
+meta1 <- meta1 %>% full_join(brk_cls_ids)
+dim(meta1) #now we have 4096 #are there duplicate samples per person?
+duplicated(meta1$study_id) #yes, some study ids are duplicated. 
+
+
+#kick out the low sequencing depth ones
+brk_cls_ids_deep <- brk_cls_ids %>% filter(SeqID %in% seq_stats_deep$SeqID)
+dim(brk_cls_ids_deep) #n=3970 now
+dplyr::count(brk_cls_ids_deep,study_id) %>% as.data.frame() #everyone has either 1 or 2 samples
+
+#and also filter to contain only adults included in meta1, meta2, and meta3
+brk_cls_ids_deep <- brk_cls_ids %>% filter(study_id %in% c(meta1$study_id))
+
+meta1 <- meta1 %>% filter(SeqID %in% seq_stats_deep$SeqID)
+dim(meta1) #also n=3970
+#are there still duplicates?
+duplicated(meta1$study_id) #oh yes
+
+brk_cls <- brk_cls[which(brk_cls$Sample %in% brk_cls_ids_deep$SeqID),]
+
+```
+
+```{r giant barplot genus}
+#make a giant barplot. Summarized at family level.?
+#define colours to use in plots #25 + others
+colours <- c("steelblue", "goldenrod1","forestgreen", "lightblue1", "lightpink", "red", 
+             "darkorchid3", "darkseagreen1", "khaki1",  "palevioletred", "darkturquoise", "honeydew4",
+             "gray95", "plum1", "blue",  "purple", "yellow", 
+             "green", "orange", "turquoise",
+             "chartreuse4", "thistle3", "firebrick3", "lightsteelblue2", "saddlebrown",
+             "black")
+
+feces_tax <- brk_cls %>% 
+  dplyr::group_by(Genus) %>% 
+  dplyr::summarize(abund=sum(Abundance))
+#move all but the 25 most abundant taxa into an 'others' category
+top_taxa <- (head(feces_tax[order(feces_tax$abund, decreasing=TRUE),], 25))$Genus #and yet Acetatifactor is a top taxa!
+
+feces <- brk_cls %>% mutate(plot_taxa=ifelse(Genus %in% top_taxa,
+                                             yes=Genus,
+                                             no="others"))
+
+feces_plot <- feces %>% 
+  dplyr::group_by(Sample, plot_taxa) %>% 
+  dplyr::summarize(Abundance=sum(Abundance))
+#put the taxa in order so that "others" is last
+top_taxa_order <- c(top_taxa, "others")
+feces_plot$plot_taxa <- factor(feces_plot$plot_taxa,
+                              levels=top_taxa_order)
+
+#rename Acetatifactor as Waltera
+feces_plot$plot_taxa <- gsub("Acetatifactor", "Waltera", feces_plot$plot_taxa)
+
+#put the taxa in order so that "others" is last
+top_taxa_order <- c(gsub("Acetatifactor", "Waltera", top_taxa), "others")
+feces_plot$plot_taxa <- factor(feces_plot$plot_taxa,
+                              levels=top_taxa_order)
+
+
+#order by most abundant genus, e.g., Bacteroides
+# First, get Bacteroides or Prevotella abundances for all samples
+bact_abund <- feces_plot %>% 
+  ungroup() %>%
+  filter(plot_taxa == "Bacteroides") %>%
+  select(Sample, Abundance, Sample)
+#is bacteroides 100% prevalent?
+dplyr::count(ungroup(feces_plot), Sample)
+dplyr::count(ungroup(bact_abund), Sample)
+
+# Order samples by Bacteroides abundance
+ordered_samples <- bact_abund %>%
+  arrange(desc(Abundance)) %>%
+  pull(Sample)
+
+# Relevel the Sample factor
+feces_plot <- ungroup(feces_plot)
+feces_plot$Sample <- factor(feces_plot$Sample, levels = ordered_samples)
+
+#basic bar plot #gorgeous
+#it differs somewhat from Germany in that e.g. Prevotella and Blautia are less prevalent, Alistipes is more
+#pdf(width=10, height=5, "/ebio/abt3_projects2/uHEAT/data/plots5/giant_barplot_genus.pdf")
+p <- ggplot(feces_plot, aes(Sample, Abundance, fill=plot_taxa)) + geom_bar(stat="identity")
+#coord_flip() +
+#facet_grid(. ~ Diet, drop=FALSE,scale="free",space="free_x") + theme_bw() 
+p <- p + labs(x="Sample", y="Proportion") + 
+  scale_y_continuous(expand = c(0,0)) + theme(strip.background = element_rect(fill="gray85")) +
+  scale_fill_manual(values = colours) +theme(panel.spacing = unit(0.3, "lines")) +
+  theme(axis.text.x=element_blank()) + 
+  guides(fill=guide_legend(title="Taxa"))
+p
+#dev.off()
+
+```
+
+```{r Waltera by fever}
+#find and quantify Waltera / Acetatifactor in the dataset
+Waltera <- brk_cls %>% filter(Genus=="Acetatifactor")
+#summarize by genus for Waltera only
+Waltera <- Waltera %>% group_by(Genus, Sample) %>%
+  summarize(Abundance=sum(Abundance))
+dim(Waltera) #for ~4500 samples, we have a Waltera abundance.
+
+#combine with metadata
+Waltera$SeqID <- Waltera$Sample
+Waltera_meta1 <- Waltera %>% full_join(meta1) %>%
+  filter(cv19a1_vac==1) #people who exist and got a vaccine
+dim(Waltera_meta1) #n=1500 ish people #NB this is not people, this is samples!!
+dim(dplyr::count(Waltera_meta1, study_id)) #n=1014 unique people
+#check Waltera prevalencen/abundance in this dataset which I actually used for analysis
+summary(Waltera$Abundance*100) #min 0, but mean of 1.78% so actually similar to µHEAT. Max is 40%!!!
+hist(Waltera$Abundance)
+#what is the prevalence of non-zero Waltera?
+Waltera$Presence <- ifelse(Waltera$Abundance>0, 1, 0)
+sum(Waltera$Presence)/length(Waltera$Presence)*100 #prevalence of 91.0 %
+
+#recall that "cv19a1_vaceffects_list___3" etc. corresponds to fever after vaccine.
+p1 <- ggplot(Waltera_meta1, aes(x=as.factor(cv19a1_vaceffects_list___3), y=log(Abundance))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1)
+p1 #actually the trend is in the right direction I'd say 
+wilcox.test(Waltera_meta1$Abundance~as.factor(Waltera_meta1$cv19a1_vaceffects_list___3)) #p=0.28 #=0.21?
+
+#change 0/1 to no/yes to make it more intuitive.
+Waltera_meta1$Fever <- ifelse(Waltera_meta1$cv19a1_vaceffects_list___3==0, "no", "yes")
+
+#pdf(width=2, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/CHILD_Waltera.pdf")
+p1 <- ggplot(Waltera_meta1, aes(x=Fever, y=log(Abundance), colour=Fever)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1, shape=21) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) +
+  xlab("Fever") + ylab("Waltera (Log Rel. Abund.)") +
+    annotate('segment', x=1, xend=2, y=-0.5, yend=-0.5) + 
+  annotate('text', x=1.5, y=0, label=c("ns")) +
+theme(legend.position="none")
+p1 
+#dev.off()
+
+#check the other main reported symptoms.
+wilcox.test(Waltera_meta1$Abundance~as.factor(Waltera_meta1$cv19a1_vaceffects_list___1)) #headache #p=0.01 (?!)
+p1 <- ggplot(Waltera_meta1, aes(x=as.factor(cv19a1_vaceffects_list___1), y=log(Abundance))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1)
+p1 #omg amazing
+wilcox.test(Waltera_meta1$Abundance~as.factor(Waltera_meta1$cv19a1_vaceffects_list___2)) #fatigue #p=0.04
+wilcox.test(Waltera_meta1$Abundance~as.factor(Waltera_meta1$cv19a1_vaceffects_list___3)) #fever (sanity check) p=0.2
+wilcox.test(Waltera_meta1$Abundance~as.factor(Waltera_meta1$cv19a1_vaceffects_list___4)) #muscle or joint pain #p=0.059
+wilcox.test(Waltera_meta1$Abundance~as.factor(Waltera_meta1$cv19a1_vaceffects_list___5)) #injection site soreness p=0.07
+wilcox.test(Waltera_meta1$Abundance~as.factor(Waltera_meta1$cv19a1_vaceffects_list___6)) #nausea/vomit p=0.38
+wilcox.test(Waltera_meta1$Abundance~as.factor(Waltera_meta1$cv19a1_vaceffects_yn)) #ANY symptoms #p=0.0044 #ahhh
+#omg I can't believe I almost missed this
+pdata <- Waltera_meta1 %>% filter(!is.na(cv19a1_vaceffects_yn)) #for some reason there is ~1 NA
+
+
+#change 0/1 to no/yes to make it more intuitive.
+pdata$AnySymptom <- ifelse(pdata$cv19a1_vaceffects_yn==0, "no", "yes")
+#pdf(width=2, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/CHILD_Waltera_AnySymptom.pdf")
+p1 <- ggplot(pdata, aes(x=AnySymptom, y=log(Abundance), colour=as.factor(AnySymptom))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1, shape=21) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) +
+  xlab("Side Effects (Any)") + ylab("Waltera (Log Rel. Abund.)") +
+    annotate('segment', x=1, xend=2, y=-0.5, yend=-0.5) + 
+  annotate('text', x=1.5, y=0, label=c("*"), size=6) +
+theme(legend.position="none")
+p1 
+#dev.off()
+
+#analyze properly via a mixed linear model to control for seq depth and study id?
+pdata <- Waltera_meta1 %>% filter(!is.na(cv19a1_vaceffects_yn)&Abundance!=0) #so I can use log Abundance
+m1 <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_yn, #I can't do log Abund because zeroes
+          random=~1|study_id, 
+          data=pdata) #because missing values - make sure it's the right pdata
+summary(m1) #p=0.02 indeed (or p=0.03 if I use non-log and all values)
+#controllinng for sex, age
+m2 <- lme(log(Abundance) ~ seq_depth + sex + age + cv19a1_vaceffects_yn,
+          random=~1|study_id, 
+          na.action=na.exclude, method="ML",
+          data=pdata)
+summary(m2) #still sig #but maybe I ought to use this p val for the figure
+#the rest of the correct p values:
+m1 <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_list___1, #I can't do log Abund because zeroes
+          random=~1|study_id, 
+          data=pdata) #because missing values - make sure it's the right pdata
+summary(m1) #p=0.029 headache
+m2 <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_list___2, #I can't do log Abund because zeroes
+          random=~1|study_id, 
+          data=pdata) #because missing values - make sure it's the right pdata
+summary(m2) #p=0.11 fatigue
+m3 <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_list___3, #I can't do log Abund because zeroes
+          random=~1|study_id, 
+          data=pdata) #because missing values - make sure it's the right pdata
+summary(m3) #p=0.38 fever
+m4 <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_list___4, #I can't do log Abund because zeroes
+          random=~1|study_id, 
+          data=pdata) #because missing values - make sure it's the right pdata
+summary(m4) #p=0.08 myalgia
+m5 <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_list___5, #I can't do log Abund because zeroes
+          random=~1|study_id, 
+          data=pdata) #because missing values - make sure it's the right pdata
+summary(m5) #p=0.19 injection site pain
+
+#plot all the other ones too, for supplemental. #use pvals from the lmes
+summary(m1)
+pdata$Headache <- ifelse(pdata$cv19a1_vaceffects_list___1==0, "no", "yes")
+#pdf(width=2, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/CHILD_Waltera_Headache.pdf")
+p1 <- ggplot(pdata, aes(x=Headache, y=log(Abundance), colour=Headache)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1, shape=21) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) +
+  xlab("Headache") + ylab("Waltera (Log Rel. Abund.)") +
+    annotate('segment', x=1, xend=2, y=-0.5, yend=-0.5) + 
+  annotate('text', x=1.5, y=0, label=c("*"), size=6) +
+theme(legend.position="none")
+p1 
+#dev.off()
+summary(m2) #I think p>0.1 should be the cutoff to not write the p value
+
+pdata$Fatigue <- ifelse(pdata$cv19a1_vaceffects_list___2==0, "no", "yes")
+#pdf(width=2, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/CHILD_Waltera_Fatigue.pdf")
+p1 <- ggplot(pdata, aes(x=Fatigue, y=log(Abundance), colour=Fatigue)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1, shape=21) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) +
+  xlab("Fatigue") + ylab("Waltera (Log Rel. Abund.)") +
+    annotate('segment', x=1, xend=2, y=-0.5, yend=-0.5) + 
+  annotate('text', x=1.5, y=0, label=c("ns")) +
+theme(legend.position="none")
+p1 
+#dev.off()
+summary(m4)
+
+pdata$Myalgia <- ifelse(pdata$cv19a1_vaceffects_list___4==0, "no", "yes")
+#pdf(width=2, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/CHILD_Waltera_Myalgia.pdf")
+p1 <- ggplot(pdata, aes(x=Myalgia, y=log(Abundance), colour=Myalgia)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1, shape=21) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) +
+  xlab("Myalgia") + ylab("Waltera (Log Rel. Abund.)") +
+    annotate('segment', x=1, xend=2, y=-0.5, yend=-0.5) + 
+  annotate('text', x=1.5, y=0, label=c("p=0.08")) +
+theme(legend.position="none")
+p1 
+#dev.off()
+
+summary(m5)
+
+pdata$InjSitePain <- ifelse(pdata$cv19a1_vaceffects_list___5==0, "no", "yes")
+#pdf(width=2, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/CHILD_Waltera_InjectionSite.pdf")
+p1 <- ggplot(pdata, aes(x=InjSitePain, y=log(Abundance), colour=InjSitePain)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1, shape=21) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) +
+  xlab("Inj. Site Pain") + ylab("Waltera (Log Rel. Abund.)") +
+    annotate('segment', x=1, xend=2, y=-0.5, yend=-0.5) + 
+  annotate('text', x=1.5, y=0, label=c("ns")) +
+theme(legend.position="none")
+p1 
+#dev.off()
+
+#alternative to LME's, just do it per person.
+Waltera_meta1_perperson <- Waltera_meta1 %>% group_by(study_id, 
+                                                      cv19a1_vaceffects_yn,
+                                                      cv19a1_vaceffects_list___1,
+                                                      cv19a1_vaceffects_list___2,
+                                                      cv19a1_vaceffects_list___3,
+                                                      cv19a1_vaceffects_list___4,
+                                                      cv19a1_vaceffects_list___5,
+                                                      cv19a1_vaceffects_list___6
+                                                      ) %>%
+  summarize(Abundance=mean(Abundance, na.rm=TRUE))
+dim(Waltera_meta1_perperson) #n=1014 people
+duplicated(Waltera_meta1_perperson$study_id) #no (just checking)
+
+wilcox.test(Waltera_meta1_perperson$Abundance~as.factor(Waltera_meta1_perperson$cv19a1_vaceffects_list___2)) #fatigue #p=0.11
+wilcox.test(Waltera_meta1_perperson$Abundance~as.factor(Waltera_meta1_perperson$cv19a1_vaceffects_list___3)) #fever (sanity check) p=0.5
+wilcox.test(Waltera_meta1_perperson$Abundance~as.factor(Waltera_meta1_perperson$cv19a1_vaceffects_list___4)) #muscle or joint pain #p=0.1
+wilcox.test(Waltera_meta1_perperson$Abundance~as.factor(Waltera_meta1_perperson$cv19a1_vaceffects_list___5)) #injection site soreness p=0.15
+wilcox.test(Waltera_meta1_perperson$Abundance~as.factor(Waltera_meta1_perperson$cv19a1_vaceffects_list___6)) #nausea/vomit p=0.7
+wilcox.test(Waltera_meta1_perperson$Abundance~as.factor(Waltera_meta1_perperson$cv19a1_vaceffects_yn)) #ANY symptoms #p=0.04 #ok phew
+
+#instead of excluding zeroes, add +1 to the abundance
+pdata1 <- Waltera_meta1 %>% filter(!is.na(cv19a1_vaceffects_yn)) 
+pdata1$Abundance <- ifelse(pdata1$Abundance==0.000000, yes=0.000001, no=pdata1$Abundance)
+m1 <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_yn, #I can't do log Abund because zeroes
+          random=~1|study_id, 
+          data=pdata1) #because missing values - make sure it's the right pdata
+summary(m1) #p=0.02 indeed with all values including imputed zeroes
+#controllinng for sex, age
+m2 <- lme(log(Abundance) ~ seq_depth + sex + age + cv19a1_vaceffects_yn,
+          random=~1|study_id, 
+          na.action=na.exclude, method="ML",
+          data=pdata1)
+summary(m2) #still sig #but maybe I ought to use this p val for the figure
+#the rest of the correct p values:
+m1 <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_list___1, #I can't do log Abund because zeroes
+          random=~1|study_id, 
+          data=pdata1) #because missing values - make sure it's the right pdata
+summary(m1) #p=0.044 headache with imputed zeroes
+m2 <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_list___2, #I can't do log Abund because zeroes
+          random=~1|study_id, 
+          data=pdata1) #because missing values - make sure it's the right pdata
+summary(m2) #p=0.10 fatigue with imputed zeroes
+m3 <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_list___3, #I can't do log Abund because zeroes
+          random=~1|study_id, 
+          data=pdata1) #because missing values - make sure it's the right pdata
+summary(m3) #p=0.27 fever
+m4 <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_list___4, #I can't do log Abund because zeroes
+          random=~1|study_id, 
+          data=pdata1) #because missing values - make sure it's the right pdata
+summary(m4) #p=0.06 myalgia
+m5 <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_list___5, #I can't do log Abund because zeroes
+          random=~1|study_id, 
+          data=pdata1) #because missing values - make sure it's the right pdata
+summary(m5) #p=0.26 injection site pain
+
+
+#same thing, but by age & sex.
+summary(Waltera_meta1$age)
+Waltera_meta1_YA <- Waltera_meta1 %>% 
+  filter(age>=18&age<=40)
+dim(Waltera_meta1_YA) #this age data was more complete: now it is n=347
+Waltera_meta1_A <- Waltera_meta1 %>% 
+  filter(age>=18)
+summary(Waltera_meta1_A$age)
+dim(Waltera_meta1_A) #n=1554
+
+p1 <- ggplot(Waltera_meta1_A, aes(x=as.factor(cv19a1_vaceffects_list___3), y=log(Abundance))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1) +
+  facet_grid(.~sex)
+p1 #ok - in YA it is opposite, in all adults kind of same ish
+wilcox.test(Waltera_meta1_A$Abundance~as.factor(Waltera_meta1_A$cv19a1_vaceffects_list___3)) #p=0.26
+
+#is it stronger in men or in women? maybe a tiny bit in men
+Waltera_meta1_Am <- Waltera_meta1_A %>% filter(sex=="male")
+dim(Waltera_meta1_Am) #n=596
+Waltera_meta1_Af <- Waltera_meta1_A %>% filter(sex=="female")
+dim(Waltera_meta1_Af)  #n=945
+
+p1f <- ggplot(Waltera_meta1_Af, aes(x=as.factor(cv19a1_vaceffects_list___3), y=log(Abundance))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1)
+p1f
+wilcox.test(Waltera_meta1_Af$Abundance~as.factor(Waltera_meta1_Af$cv19a1_vaceffects_list___3)) #p=0.5
+
+p1m <- ggplot(Waltera_meta1_Am, aes(x=as.factor(cv19a1_vaceffects_list___3), y=log(Abundance))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1)
+p1m
+wilcox.test(Waltera_meta1_Am$Abundance~as.factor(Waltera_meta1_Am$cv19a1_vaceffects_list___3)) #p=0.2
+#by age cat and/or sex in full dataset
+p1 <- ggplot(Waltera_meta1, aes(x=as.factor(cv19a1_vaceffects_list___3), y=log(Abundance))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1) +
+  facet_grid(Sex~Age_cat)
+p1 #hmm - doesn't seem like a big difference - but also there is so much missing data
+
+#only looking at baseline stool, before the vaccine.
+#Waltera_meta1 %>% dplyr::select(study_id, fecal_relative_to_vaccine, SeqID) %>% as.data.frame() 
+Waltera_meta1_stool_before <- Waltera_meta1 %>% filter(fecal_relative_to_vaccine=="BeforeDose1")
+dim(Waltera_meta1_stool_before) #SIGNIFICANTLY reduced sample size of only 300 people (instead of 1500)
+
+p1 <- ggplot(Waltera_meta1, aes(x=as.factor(cv19a1_vaceffects_list___3), y=log(Abundance))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1) +
+  facet_grid(.~fecal_relative_to_vaccine)
+p1 
+wilcox.test(Waltera_meta1_stool_before$Abundance~Waltera_meta1_stool_before$cv19a1_vaceffects_list___3) #NS
+wilcox.test(Waltera_meta1_stool_before$Abundance~Waltera_meta1_stool_before$cv19a1_vaceffects_list___1) #NS p=0.18
+wilcox.test(Waltera_meta1_stool_before$Abundance~Waltera_meta1_stool_before$cv19a1_vaceffects_list___2) #p=0.06 (fatigue)
+wilcox.test(Waltera_meta1_stool_before$Abundance~Waltera_meta1_stool_before$cv19a1_vaceffects_list___4) #NS (fatigue)
+wilcox.test(Waltera_meta1_stool_before$Abundance~Waltera_meta1_stool_before$cv19a1_vaceffects_list___5) #p=0.1 (site)
+wilcox.test(Waltera_meta1_stool_before$Abundance~Waltera_meta1_stool_before$cv19a1_vaceffects_yn)
+
+
+#ok same exact thing but by antibodies, not fever. #make sure we only look at antibodies at the same time point e.g. after dose 2
+#at least 2 weeks after dose 2, to ensure robust antibody production.
+Waltera_meta1_afterdose2 <- Waltera_meta1 %>% filter(blood_relative_to_vaccine=="AfterDose2_2wks")
+dim(Waltera_meta1_afterdose2) #n=1263 so not such a bad sample size
+
+##Waltera by antibodies analagous to Lachno
+Waltera_meta1_afterdose2$IgG_hilo_s2 <- ifelse(as.numeric(Waltera_meta1_afterdose2$serology_lum_s_igg)>mean(as.numeric(Waltera_meta1_afterdose2$serology_lum_s_igg), na.rm=TRUE), "hi", "lo")
+Waltera_meta1_afterdose2$IgG_hilo_s2 <- factor(Waltera_meta1_afterdose2$IgG_hilo_s2, levels=c("lo", "hi"))
+
+
+p1 <- ggplot(Waltera_meta1_afterdose2, aes(x=IgG_hilo_s2, y=log(Abundance))) + 
+  geom_boxplot() + 
+  geom_jitter(width=0.1, height=0)
+p1 #
+wilcox.test(Waltera_meta1_afterdose2$Abundance ~ Waltera_meta1_afterdose2$IgG_hilo_s2) #p=0.82
+
+#pdf(width=2, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/CHILD_Waltera_IgG.pdf")
+p1 <- ggplot(Waltera_meta1_afterdose2, aes(x=IgG_hilo_s2, y=log(Abundance), colour=as.factor(IgG_hilo_s2))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1, shape=21) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  scale_colour_manual(values=c("skyblue", "skyblue4")) + 
+  xlab("Anti-SARSCoV2 IgG") + ylab("Lachno (Log Rel. Abund.)") +
+    annotate('segment', x=1, xend=2, y=0, yend=0) + 
+  annotate('text', x=1.5, y=0.5, label=c("ns")) +
+theme(legend.position="none")
+p1 
+#dev.off()
+
+#but to be analagous to the side effects, I ought to test via mixed linear model.
+pdata <- Waltera_meta1_afterdose2 %>% filter(!is.na(IgG_hilo_s2)&Abundance!=0) #because log
+dim(pdata)
+m1 <- lme(log(Abundance) ~ seq_depth + IgG_hilo_s2, 
+          random=~1|study_id, 
+          data=pdata) #because missing values - make sure it's the right pdata
+summary(m1) #NS
+
+#I'm not sure it's possible here to control for baseline antibodies because I think most people only gave 1 blood/fecal sample.
+dplyr::count(Waltera_meta1, study_id)
+Waltera_meta1_doubles <- dplyr::count(Waltera_meta1, study_id) %>% as.data.frame() %>% filter(n>1)
+Waltera_meta1_doubles <-  Waltera_meta1 %>% filter(study_id %in% Waltera_meta1_doubles$study_id)
+Waltera_meta1_doubles %>% dplyr::select(study_id, Sample, Abundance, cv19a1_vacdose, serology_lum_n_igg) %>% View()
+#actually so even for the 'doubles', it's 2 fecal samples but 1 blood sample
+summary(Waltera_meta1$cv19a1_vacdose)
+dplyr::count(Waltera_meta1, cv19a1_vacdose) %>% mutate(per=n/sum(n)*100) #the VAST majority, nearly everyone, got dose 2
+dplyr::count(Waltera_meta1, type_of_dose2) %>% mutate(per=n/sum(n)*100) 
+#how many can I say overall received a 2nd dose mRNA vaccine?
+Waltera_meta1$dose2_mRNA <- ifelse(Waltera_meta1$cv19a1_vacdose==2&Waltera_meta1$type_of_dose2 %in% c("Moderna mRNA vaccine", "Pfizer and BioNTech mRNA"), "yes", "no")
+Waltera_meta1 %>% filter(!duplicated(study_id)) %>% dplyr::count(dose2_mRNA) %>% mutate(per=n/sum(n)*100) #90%
+
+```
+
+```{r feces df}
+#read these in from an executable script, CHILD.DNA.Maaslin.Executable.R
+#first : a small(ish) test dataframe to test Maaslin2 models
+feces_df_genus_small <- read.csv("/ebio/abt3_projects2/CHILD_uHEAT/code/Maaslin2/feces_df_genus_small.csv", row.names=1)
+
+```
+
+```{r maaslin2}
+#finally got this running in /ebio/abt3_projects2/CHILD_uHEAT/code/Maaslin2/CHILD.DNA.Maaslin.Executable.R
+#import the results
+fevergen1 <- read.csv("/ebio/abt3_projects2/CHILD_uHEAT/code/Maaslin2/DNAg_meta1_fever.csv", row.names=1)
+fevergen1 <- fevergen1 %>% filter(metadata=="cv19a1_vaceffects_list___3"&qval<0.1)
+fevergen1 #some strains of Butyribacter are flagellated
+
+#get taxonomy
+tax_table <- read.csv("/ebio/abt3_projects2/CHILD_uHEAT/code/Maaslin2/tax_table.csv", row.names=1)
+fevergen1 <- fevergen1 %>% rename(Genus=feature) %>%
+  full_join(tax_table) %>%
+  filter(!is.na(pval))
+#well, it is indeed a Lachno #maybe we should do species level
+
+#it would be interesting to look at the gene level for flagellins. But for that I have to run humann3 and that has now been going for literally weeks. WEEKS.
+
+fevergen1 <- read.csv("/ebio/abt3_projects2/CHILD_uHEAT/code/Maaslin2/DNAg_meta1_fever.csv", row.names=1)
+fevergen1 <- fevergen1 %>% filter(metadata=="cv19a1_vaceffects_list___3"&qval<0.1)
+fevergen1 #some strains of Butyribacter are flagellated
+
+```
+
+```{r analyze Lachno by fever}
+#Start with the entire Lachnospiraceae family to check
+Lachno <- brk_cls %>% filter(Family=="Lachnospiraceae")
+#summarize by family for Lachno only
+Lachno <- Lachno %>% group_by(Family, Sample) %>%
+  summarize(Abundance=sum(Abundance))
+dim(Lachno) #for 4500 samples, we have a Lachno abundance.
+
+#combine with metadata
+Lachno$SeqID <- Lachno$Sample
+Lachno_meta1 <- Lachno %>% full_join(meta1) %>%
+  filter(cv19a1_vac==1) #people who exist and got a vaccine
+dim(Lachno_meta1) #n=1500 ish people
+
+#change 0/1 to no/yes to make it more intuitive
+Lachno_meta1$Fever <- ifelse(Lachno_meta1$cv19a1_vaceffects_list___3==0, "no", "yes")
+
+#pdf(width=2, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/CHILD_Lachno.pdf")
+p1 <- ggplot(Lachno_meta1, aes(x=Fever, y=log(Abundance), colour=Fever)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1, shape=21) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) +
+  xlab("Fever") + ylab("Lachnospiraceae (Log Rel. Abund.)") +
+    annotate('segment', x=1, xend=2, y=0.25, yend=0.25) + 
+  annotate('text', x=1.5, y=0.5, label=c("**"), size=6) +
+theme(legend.position="none")
+p1 #actually the trend is in the right direction I'd say 
+#dev.off()
+wilcox.test(Lachno_meta1$Abundance~as.factor(Lachno_meta1$cv19a1_vaceffects_list___3)) #p=0.009! hey!
+
+#check the other main reported symptoms.
+wilcox.test(Lachno_meta1$Abundance~as.factor(Lachno_meta1$cv19a1_vaceffects_list___1)) #headache #p=0.4
+wilcox.test(Lachno_meta1$Abundance~as.factor(Lachno_meta1$cv19a1_vaceffects_list___2)) #fatigue #p=0.01
+wilcox.test(Lachno_meta1$Abundance~as.factor(Lachno_meta1$cv19a1_vaceffects_list___3)) #fever (sanity check) p=0.0.006
+wilcox.test(Lachno_meta1$Abundance~as.factor(Lachno_meta1$cv19a1_vaceffects_list___4)) #muscle or joint pain #p=0.0002
+wilcox.test(Lachno_meta1$Abundance~as.factor(Lachno_meta1$cv19a1_vaceffects_list___5)) #injection site soreness p=0.1
+wilcox.test(Lachno_meta1$Abundance~as.factor(Lachno_meta1$cv19a1_vaceffects_list___6)) #nausea/vomit p=0.1
+wilcox.test(Lachno_meta1$Abundance~as.factor(Lachno_meta1$cv19a1_vaceffects_yn)) #ANY symptoms #p=0.0008 #ahhh
+#omg I can't believe I almost missed this
+pdata <- Lachno_meta1 %>% filter(!is.na(cv19a1_vaceffects_yn)) #for some reason there is ~1 NA
+
+#change 0/1 to no/yes to make it more intuitive
+pdata$AnySymptom <- ifelse(pdata$cv19a1_vaceffects_yn==0, "no", "yes")
+
+#pdf(width=2, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/CHILD_Lachno_AnySymptom.pdf")
+p1 <- ggplot(pdata, aes(x=AnySymptom, y=log(Abundance), colour=AnySymptom)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1, shape=21) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) +
+  xlab("Side Effects (Any)") + ylab("Lachnospiraceae (Log Rel. Abund.)") +
+    annotate('segment', x=1, xend=2, y=0.25, yend=0.25) + 
+  annotate('text', x=1.5, y=0.5, label=c("**"), size=6) +
+theme(legend.position="none")
+p1 
+#dev.off()
+
+
+#analyze properly via a mixed linear model to control for seq depth and study id?
+m1 <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_list___3,
+          random=~1|study_id, 
+          data=Lachno_meta1)
+#p=0.009, same as the wilcoxon basically
+#controllinng for sex, age
+m2 <- lme(log(Abundance) ~ seq_depth + sex + age + cv19a1_vaceffects_list___3,
+          random=~1|study_id, 
+          na.action=na.exclude, method="ML",
+          data=Lachno_meta1)
+summary(m2) #still sig
+pdata <- Lachno_meta1 %>% filter(!is.na(cv19a1_vaceffects_yn))
+m1b <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_yn,
+          random=~1|study_id, 
+          data=pdata) #because missing values - make sure it's the right pdata
+summary(m1b) #**
+#controllinng for sex, age
+m2b <- lme(log(Abundance) ~ seq_depth + sex + age + cv19a1_vaceffects_yn,
+          random=~1|study_id, 
+          na.action=na.exclude, method="ML",
+          data=pdata)
+summary(m2b) #still sig **
+#check all the other symptoms correctly via lm
+m1 <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_list___1,
+          random=~1|study_id, 
+          data=Lachno_meta1)
+summary(m1) #NS
+m2 <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_list___2,
+          random=~1|study_id, 
+          data=Lachno_meta1)
+summary(m2) #p=0.03 fatigue
+m3 <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_list___3,
+          random=~1|study_id, 
+          data=Lachno_meta1)
+summary(m3) #p=0.006 fever
+m4 <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_list___4,
+          random=~1|study_id, 
+          data=Lachno_meta1)
+summary(m4) #p=0.002 myalgia
+m5 <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_list___5,
+          random=~1|study_id, 
+          data=Lachno_meta1)
+summary(m5) #p=0.12 injection site
+m6 <- lme(log(Abundance) ~ seq_depth + cv19a1_vaceffects_list___6,
+          random=~1|study_id, 
+          data=Lachno_meta1)
+summary(m6) #p=0.13 nausea
+
+#plot each of these individually with the correct p value
+summary(m1)
+
+#change 0/1 to no/yes to make it more intuitive
+pdata$Headache <- ifelse(pdata$cv19a1_vaceffects_list___1==0, "no", "yes")
+#pdf(width=2, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/CHILD_Lachno_Headache.pdf")
+p1 <- ggplot(pdata, aes(x=Headache, y=log(Abundance), colour=Headache)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1, shape=21) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) +
+  xlab("Headache") + ylab("Lachnospiraceae (Log Rel. Abund.)") +
+    annotate('segment', x=1, xend=2, y=0, yend=0) + 
+  annotate('text', x=1.5, y=0.5, label=c("ns")) +
+theme(legend.position="none")
+p1 
+#dev.off()
+
+summary(m2)
+
+#change 0/1 to no/yes to make it more intuitive
+pdata$Fatigue <- ifelse(pdata$cv19a1_vaceffects_list___2==0, "no", "yes")
+#pdf(width=2, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/CHILD_Lachno_Fatigue.pdf")
+p1 <- ggplot(pdata, aes(x=Fatigue, y=log(Abundance), colour=Fatigue)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1, shape=21) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) +
+  xlab("Fatigue") + ylab("Lachno (Log Rel. Abund.)") +
+    annotate('segment', x=1, xend=2, y=0, yend=0) + 
+  annotate('text', x=1.5, y=0.5, label=c("*"), size=6) +
+theme(legend.position="none")
+p1 
+#dev.off()
+
+summary(m4)
+#change 0/1 to no/yes to make it more intuitive
+pdata$Myalgia <- ifelse(pdata$cv19a1_vaceffects_list___4==0, "no", "yes")
+#pdf(width=2, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/CHILD_Lachno_Myalgia.pdf")
+p1 <- ggplot(pdata, aes(x=Myalgia, y=log(Abundance), colour=Myalgia)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1, shape=21) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) +
+  xlab("Myalgia") + ylab("Lachno (Log Rel. Abund.)") +
+    annotate('segment', x=1, xend=2, y=0, yend=0) + 
+  annotate('text', x=1.5, y=0.5, label=c("**"), size=6) +
+theme(legend.position="none")
+p1 
+#dev.off()
+
+summary(m5)
+pdata$InjSitePain <- ifelse(pdata$cv19a1_vaceffects_list___5==0, "no", "yes")
+pdf(width=2, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/CHILD_Lachno_InjectionSite.pdf")
+p1 <- ggplot(pdata, aes(x=InjSitePain, y=log(Abundance), colour=InjSitePain)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1, shape=21) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  scale_colour_manual(values=c("grey50", "firebrick3")) +
+  xlab("Inj. Site Pain") + ylab("Lachno (Log Rel. Abund.)") +
+    annotate('segment', x=1, xend=2, y=0, yend=0) + 
+  annotate('text', x=1.5, y=0.5, label=c("ns")) +
+theme(legend.position="none")
+p1 
+dev.off()
+
+#controlling for sex, age,  antibodies?
+m3a <- lme(log(Abundance) ~ seq_depth + age + sex + as.numeric(serology_sco_n_igg) + cv19a1_vaceffects_list___3,
+          random=~1|study_id, 
+          na.action=na.exclude,
+          data=Lachno_meta1)
+summary(m3a) #weirdly significant?
+m3b <- lme(log(Abundance) ~ seq_depth + age + sex + as.numeric(serology_sco_s_igg) + cv19a1_vaceffects_list___3,
+          random=~1|study_id, 
+          na.action=na.exclude,
+          data=Lachno_meta1)
+summary(m3b) #weirdly significant?
+
+
+#if we summarize per person? i.e. across biological duplicates
+pdata1 <- Lachno_meta1 %>%
+  group_by(study_id,cv19a1_vaceffects_list___3) %>%
+  summarize(Abundance=mean(Abundance))
+
+p1 <- ggplot(pdata1, aes(x=as.factor(cv19a1_vaceffects_list___3), y=log(Abundance))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1)
+p1 #actually the trend is in the right direction I'd say 
+wilcox.test(pdata1$Abundance~as.factor(pdata1$cv19a1_vaceffects_list___3)) #p=0.02, still significant!
+
+
+p2 <- ggplot(Lachno_meta2, aes(x=as.factor(cv19a2_vaceffects_list___3), y=log(Abundance))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1)
+p2 #less impressive
+wilcox.test(Lachno_meta2$Abundance~as.factor(Lachno_meta2$cv19a2_vaceffects_list___3)) #NS
+
+p3 <- ggplot(Lachno_meta3, aes(x=as.factor(cv19a3_vaceffects_list___3), y=log(Abundance))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1)
+p3 #less impressive
+wilcox.test(Lachno_meta3$Abundance~as.factor(Lachno_meta3$cv19a3_vaceffects_list___3)) #p=0.1
+
+###and now: checking by age, sex, bmi, etc. etc.
+Lachno_meta1_YA <- Lachno_meta1 %>% 
+  filter(age>=18&age<=40)
+dim(Lachno_meta1_YA) #this age data was more complete: now it is n=347
+Lachno_meta1_A <- Lachno_meta1 %>% 
+  filter(age>=18)
+summary(Lachno_meta1_A$age)
+dim(Lachno_meta1_A) #n=1554
+
+p1 <- ggplot(Lachno_meta1_YA, aes(x=as.factor(cv19a1_vaceffects_list___3), y=log(Abundance))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1) +
+  facet_grid(.~sex)
+p1 #for total Lachno, does not matter YA vs A
+wilcox.test(Lachno_meta1_A$Abundance~as.factor(Lachno_meta1_A$cv19a1_vaceffects_list___3)) #p=0.006 still
+
+#is it stronger in men or in women? maybe a tiny bit in men
+Lachno_meta1_Am <- Lachno_meta1_A %>% filter(sex=="male")
+Lachno_meta1_Af <- Lachno_meta1_A %>% filter(sex=="female")
+wilcox.test(Lachno_meta1_Af$Abundance~as.factor(Lachno_meta1_Af$cv19a1_vaceffects_list___3)) #p=0.02
+wilcox.test(Lachno_meta1_Am$Abundance~as.factor(Lachno_meta1_Am$cv19a1_vaceffects_list___3)) #p=0.15
+
+#by age cat and/or sex in full dataset
+p1 <- ggplot(Lachno_meta1, aes(x=as.factor(cv19a1_vaceffects_list___3), y=log(Abundance))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1) +
+  facet_grid(sex~Age_cat)
+p1 #hmm - doesn't seem like a big difference. Most adults are 40-50.
+
+#only looking at baseline stool, before the vaccine.
+Lachno_meta1 %>% dplyr::select(study_id, fecal_relative_to_vaccine, SeqID) %>% as.data.frame() #I'm not sure this has worked as I wanted it to
+Lachno_meta1_stool_before <- Lachno_meta1 %>% filter(fecal_relative_to_vaccine=="BeforeDose1")
+
+p1 <- ggplot(Lachno_meta1, aes(x=as.factor(cv19a1_vaceffects_list___3), y=log(Abundance))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1) +
+  facet_grid(.~fecal_relative_to_vaccine)
+p1 
+wilcox.test(Lachno_meta1_stool_before$Abundance~Lachno_meta1_stool_before$cv19a1_vaceffects_list___3) #p=0.1
+#but the trend is still there, I think it's more a sample size thing.
+
+#versus antibodies
+Lachno_meta1_afterdose2 <- Lachno_meta1 %>% filter(blood_relative_to_vaccine=="AfterDose2_2wks")
+dim(Lachno_meta1_afterdose2) #n=1263 samples
+dplyr::count(Lachno_meta1_afterdose2, study_id) %>% as.data.frame() %>% dim() #n=759 people
+p1 <- ggplot(Lachno_meta1_afterdose2, aes(x=log(as.numeric(serology_iu_s_igg)), y=log(Abundance))) + 
+  geom_point() + geom_smooth(method='lm')
+p1 #completely flat line
+
+p2 <- ggplot(Lachno_meta1_afterdose2, aes(x=log(as.numeric(serology_lum_s_igg)), y=log(Abundance))) + 
+  geom_point() + geom_smooth(method='lm')
+p2
+
+p3 <- ggplot(Lachno_meta1_afterdose2, aes(x=as.numeric(serology_sco_s_igg), y=log(Abundance))) + 
+  geom_point() + geom_smooth(method='lm')
+p3
+
+#comparable to fever and to the other analyses, divide people into antibody-high and antibody-low based on the group mean.
+#the correct variable to divide should be either luminescence (scaled within the study) or IU (international units) anti-spike
+#according to the data dictionary: "BAU values have an upper limit (150–200; as defined by a conversion model developed by the Langlois lab); therefore, comparing scaled luminescence values remains a valid approach for assessing relative antibody levels within the CHILD Cohort."
+#so for dividing high vs low, I think I will use scaled luminescence
+Lachno_meta1_afterdose2$IgG_hilo_s2 <- ifelse(as.numeric(Lachno_meta1_afterdose2$serology_lum_s_igg)>mean(as.numeric(Lachno_meta1_afterdose2$serology_lum_s_igg), na.rm=TRUE), "hi", "lo")
+
+Lachno_meta1_afterdose2$IgG_hilo_s2 <- factor(Lachno_meta1_afterdose2$IgG_hilo_s2, levels=c("lo", "hi"))
+p1 <- ggplot(Lachno_meta1_afterdose2, aes(x=IgG_hilo_s2, y=log(Abundance))) + 
+  geom_boxplot() + 
+  geom_jitter(width=0.1, height=0)
+p1 #
+wilcox.test(Lachno_meta1_afterdose2$Abundance ~ Lachno_meta1_afterdose2$IgG_hilo_s2) #p=0.18
+
+#pdf(width=2, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/CHILD_Lachno_IgG.pdf")
+p1 <- ggplot(Lachno_meta1_afterdose2, aes(x=IgG_hilo_s2, y=log(Abundance), colour=as.factor(IgG_hilo_s2))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1, shape=21) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  scale_colour_manual(values=c("skyblue", "skyblue4")) + 
+  xlab("Anti-SARSCoV2 IgG") + ylab("Lachno (Log Rel. Abund.)") +
+    annotate('segment', x=1, xend=2, y=0.25, yend=0.25) + 
+  annotate('text', x=1.5, y=0.5, label=c("ns")) +
+theme(legend.position="none")
+p1 
+#dev.off()
+
+
+#do it analagous via linear modle
+m5 <- lme(log(Abundance) ~ seq_depth + IgG_hilo_s2,
+          random=~1|study_id, 
+          data=Lachno_meta1_afterdose2)
+summary(m5) #p=0.12 injection site
+
+```
+
+```{r plot maaslin2 hits}
+#Butyribacter
+Butyribacter <- brk_cls %>% filter(Genus=="Butyribacter")
+#summarize by genus for Butyribacter only
+Butyribacter <- Butyribacter %>% group_by(Genus, Sample) %>%
+  summarize(Abundance=sum(Abundance))
+dim(Butyribacter) #for 4500 samples, we have a Butyribacter abundance.
+
+#combine with metadata
+Butyribacter$SeqID <- Butyribacter$Sample
+Butyribacter_meta1 <- Butyribacter %>% full_join(meta1) %>%
+  filter(cv19a1_vac==1) #people who exist and got a vaccine
+dim(Butyribacter_meta1) #n=1500 ish people
+
+
+#recall that "cv19a1_vaceffects_list___3" etc. corresponds to fever after vaccine.
+p1 <- ggplot(Butyribacter_meta1, aes(x=as.factor(cv19a1_vaceffects_list___3), y=log(Abundance))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1)
+p1 #actually the trend is in the right direction I'd say 
+wilcox.test(Butyribacter_meta1$Abundance~as.factor(Butyribacter_meta1$cv19a1_vaceffects_list___3)) #p=0.03 #OK #I like all Lachnos better
+
+```
+
+```{r filter samples files for humann3}
+samples1 <- read.delim("/ebio/abt3_projects2/CHILD_uHEAT/data/QC/batch1/final/samples.txt")
+dim(samples1) #1005
+#to save computational time, take only the samples from people who survived filtering / report a vaccine / etc.
+samples1_filt <- samples1 %>% filter(Sample %in% gsub("X", "", meta1$SeqID))
+dim(samples1_filt) #about half of them are left. So that's helpful.
+
+write.table(samples1_filt, "/ebio/abt3_projects2/CHILD_uHEAT/data/QC/batch1/final/samples_batch1_filt.txt", quote=FALSE, 
+            sep="\t", row.names=FALSE)
+
+samples2 <- read.delim("/ebio/abt3_projects2/CHILD_uHEAT/data/QC/batch2/final/samples.txt")
+dim(samples2) #1879
+#to save computational time, take only the samples from people who survived filtering / report a vaccine / etc.
+samples2_filt <- samples2 %>% filter(Sample %in% gsub("X", "", meta1$SeqID))
+dim(samples2_filt) #about half of them are left. So that's helpful.
+
+write.table(samples2_filt, "/ebio/abt3_projects2/CHILD_uHEAT/data/QC/batch2/final/samples_batch2_filt.txt", quote=FALSE, 
+            sep="\t", row.names=FALSE)
+
+samples3 <- read.delim("/ebio/abt3_projects2/CHILD_uHEAT/data/QC/batch3/final/samples.txt")
+dim(samples3) #1879
+#to save computational time, take only the samples from people who survived filtering / report a vaccine / etc.
+samples3_filt <- samples3 %>% filter(Sample %in% gsub("X", "", meta1$SeqID))
+dim(samples3_filt) #about half of them are left. So that's helpful.
+
+write.table(samples3_filt, "/ebio/abt3_projects2/CHILD_uHEAT/data/QC/batch3/final/samples_batch3_filt.txt", quote=FALSE, 
+            sep="\t", row.names=FALSE)
+
+samples4 <- read.delim("/ebio/abt3_projects2/CHILD_uHEAT/data/QC/batch4/final/samples.txt")
+dim(samples4) #1879
+#to save computational time, take only the samples from people who survived filtering / report a vaccine / etc.
+samples4_filt <- samples4 %>% filter(Sample %in% gsub("X", "", meta1$SeqID))
+dim(samples4_filt) #about half of them are left. So that's helpful.
+
+write.table(samples4_filt, "/ebio/abt3_projects2/CHILD_uHEAT/data/QC/batch4/final/samples_batch4_filt.txt", quote=FALSE, 
+            sep="\t", row.names=FALSE)
+
+#total number of samples from filtered batches
+length(samples1_filt$Sample) + length(samples2_filt$Sample) + length(samples3_filt$Sample) + length(samples4_filt$Sample)
+#n=3309
+
+```
+
+```{r medi child import}
+#new (updated) MEDI run
+files <- paste0(
+  "/ebio/abt3_projects2/CHILD_uHEAT/data/MEDI/data_batch",
+  1:10,
+  "/food_abundance.csv"
+)
+
+medi_abund <- do.call(rbind, lapply(files, read.csv))
+
+files2 <- paste0(
+  "/ebio/abt3_projects2/CHILD_uHEAT/data/MEDI/data_batch",
+  1:10,
+  "/food_content.csv"
+)
+
+medi_content <- do.call(rbind, lapply(files2, read.csv))
+
+#*remove Hibiscus, it is incorrect
+medi_abund <- medi_abund %>% filter(genus!="Hibiscus")
+
+#add a SampleID and a study_id
+medi_abund$SampleID <- substr(medi_abund$sample_id,1,nchar(medi_abund$sample_id)-11)
+medi_abund$study_id <- sapply(strsplit(medi_abund$sample_id,"_"), `[`, 2)
+
+```
+
+```{r medi child % plants}
+
+#what % of all foods detected per person were plants?
+foods_per_person_plants <- medi_abund %>% 
+  group_by(SampleID) %>% filter(!duplicated(food_id)) %>%
+  ungroup() %>% 
+  filter(phylum %in% c("Streptophyta", "Basidiomycota")) %>% #only plants and fungi
+  group_by(study_id) %>% count(species) #number of different species / food ids consumed
+foods_per_person_plants #now there are no missing species. And all the species are plants.
+#do not count again, i.e., leave as total plants rather than unique plants
+foods_per_person_plants <- foods_per_person_plants %>% group_by(study_id) %>%
+  summarize(nplants=sum(n))
+foods_per_person_plants #number of plants (and fungi) detected per person in total
+
+#normalize this to the total number of foods
+foods_per_person <- medi_abund %>% 
+  group_by(SampleID) %>% filter(!duplicated(food_id)) %>%
+  ungroup() %>% 
+  group_by(study_id) %>% count(species) #number of different species / food ids consumed, ALL
+foods_per_person #now there are no missing species. And all the species are plants.
+#do not count again, i.e., leave as total plants rather than unique plants
+foods_per_person <- foods_per_person %>% group_by(study_id) %>%
+  summarize(n=sum(n))
+foods_per_person #all foods detected, both plants and animals
+
+foods_per_person_plants <- full_join(foods_per_person_plants, foods_per_person)
+foods_per_person_plants$ratio_plants <- foods_per_person_plants$nplants/foods_per_person_plants$n
+head(foods_per_person_plants)
+
+foods_per_person_meta1 <- foods_per_person_plants %>% 
+  full_join(meta1) %>%
+  filter(!is.na(nplants))
+
+foods_per_person_meta2 <- foods_per_person_plants %>% 
+  full_join(meta2) %>%
+  filter(!is.na(nplants))
+
+foods_per_person_meta3 <- foods_per_person_plants %>% 
+  full_join(meta3) %>%
+  filter(!is.na(nplants))
+
+#does the proportion of plants differ by vaccine fever status?
+
+#recall that "cv19a1_vaceffects_list___3" etc. corresponds to fever after vaccine.
+p1 <- ggplot(foods_per_person_meta1, aes(x=as.factor(cv19a1_vaceffects_list___3), y=ratio_plants)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1)
+p1 #actually the trend is in the right direction I'd say 
+wilcox.test(foods_per_person_meta1$ratio_plants~as.factor(foods_per_person_meta1$cv19a1_vaceffects_list___3)) #p=0.66 NS
+
+```
+
+```{r medi child total food reads}
+#get rid of duplicated foods, clean up names
+maw <- medi_abund %>% 
+  group_by(SampleID) %>% 
+  filter(!duplicated(species))
+maw$wikipedia_id <- ifelse(maw$wikipedia_id=="", yes=maw$species, no=maw$wikipedia_id)
+
+#summarize total reads per phylum
+maw_phylum <- maw %>% 
+  dplyr::group_by(study_id, SampleID, phylum) %>%
+  dplyr::summarize(reads=sum(reads, na.rm=TRUE), #first sum the categories by sample
+            relabund=sum(relative_abundance, na.rm=TRUE)) %>% 
+  dplyr::group_by(study_id, phylum) %>%
+  dplyr::summarize(reads=sum(reads, na.rm=TRUE), #then sum or average by person over time 
+            relabund=mean(relabund, na.rm=TRUE)) 
+maw_phylum
+
+#for people with no foods detected, give it a dummy food variable (abund=0)
+maw_phylum[which(maw_phylum$phylum==""),] #no abund - will not pivot properly
+maw_phylum[which(maw_phylum$phylum==""),]$phylum <- c("none") #dummy variable for pivoting 
+
+#then, make it wide. 
+maw_phylum_wide <- maw_phylum %>%
+  filter(phylum!="") %>%
+  pivot_wider(names_from=phylum, values_from=c(reads, relabund)) %>%
+  dplyr::select(-c(reads_none, relabund_none))
+maw_phylum_wide 
+dim(maw_phylum_wide) #171 participants
+
+#replace the NA with zeroes for no detection.
+maw_phylum_wide[is.na(maw_phylum_wide)] <- 0
+
+#add categories
+maw_phylum_wide$reads_StreptophytaBasidiomycota <- maw_phylum_wide$reads_Streptophyta + maw_phylum_wide$reads_Basidiomycota
+maw_phylum_wide$Total_Food_Reads <- rowSums(maw_phylum_wide[,c(2:6)])
+
+maw_phylum_wide$relabund_StreptophytaBasidiomycota <- maw_phylum_wide$relabund_Streptophyta + maw_phylum_wide$relabund_Basidiomycota
+maw_phylum_wide$Total_Food_relabund <- rowSums(maw_phylum_wide[,c(7:11)])
+
+#test. is it different by fever?
+food_reads_meta <- maw_phylum_wide %>% full_join(meta1)
+
+#recall that "cv19a1_vaceffects_list___3" etc. corresponds to fever after vaccine.
+p1 <- ggplot(food_reads_meta, aes(x=as.factor(cv19a1_vaceffects_list___3), y=log(Total_Food_Reads))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1)
+p1 #no
+wilcox.test(food_reads_meta$Total_Food_Reads~as.factor(food_reads_meta$cv19a1_vaceffects_list___3)) #p=0.86
+
+p1 <- ggplot(food_reads_meta, aes(x=as.factor(cv19a1_vaceffects_list___3), y=log(Total_Food_relabund))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1)
+p1 #no
+wilcox.test(food_reads_meta$Total_Food_relabund~as.factor(food_reads_meta$cv19a1_vaceffects_list___3)) #p=0.98
+
+p1 <- ggplot(food_reads_meta, aes(x=as.factor(cv19a1_vaceffects_list___3), y=log(reads_Streptophyta))) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0, alpha=0.1)
+p1 #no
+wilcox.test(food_reads_meta$reads_Streptophyta~as.factor(food_reads_meta$cv19a1_vaceffects_list___3)) #p=0.7
+
+```
+
+```{r medi child foods}
+#Test - Fever vs Food
+maw <- medi_abund %>% group_by(sample_id) %>% filter(!duplicated(species))
+#Now, summarize it as before, per person - but by e.g. wikipedia_id
+#fill in the empty wikipedia ids with a genus
+maw$wikipedia_id <- ifelse(maw$wikipedia_id=="", yes=maw$species, no=maw$wikipedia_id)
+maw_foodname <- maw %>% 
+  dplyr::group_by(study_id, SampleID, species) %>%
+  dplyr::summarize(relative_abundance=sum(relative_abundance)) %>% #first sum the categories by sample
+  dplyr::group_by(study_id, species) %>%
+  dplyr::summarize(relative_abundance=mean(relative_abundance)) #then average by person over time
+maw_foodname
+#in participants with NO foods detected; currently the food is "" and the abund is 0 - give it a dummy food for pivoting
+maw_foodname[which(maw_foodname$species==""),] #no abund
+maw_foodname[which(maw_foodname$species==""),]$species <- c("none") #dummy food for pivoting so that blanks are retained #there is no Hibiscus anymore! so this is safe.
+
+#then, make it wide. 
+maw_foodname_wide <- maw_foodname %>%
+  filter(species!="") %>% #otherwise, exclude the empty foods / samples
+  pivot_wider(names_from=species, values_from=relative_abundance) %>%
+  dplyr::select(-c("none"))
+maw_foodname_wide 
+dim(maw_foodname_wide) #164 different foods in 1374 people. #without Hibiscus, we lose some people...
+maw_foodname_wide[is.na(maw_foodname_wide)] <- 0 
+
+#filter to align with meta1.
+maw_foodname_wide <- maw_foodname_wide[which(maw_foodname_wide$study_id %in% meta1$study_id),]
+meta1_maw <- meta1[which(meta1$study_id %in% maw_foodname_wide$study_id),]
+maw_foodname_wide <- maw_foodname_wide[order(maw_foodname_wide$study_id),]
+meta1_maw <- meta1_maw[order(meta1_maw$study_id),]
+identical(maw_foodname_wide$study_id, meta1_maw$study_id)
+
+##still need to filter for sparseness to some degree. Get rid of the mostly-zero rows, at least.
+#clean it up first.
+maw <- as.data.frame(maw_foodname_wide)
+row.names(maw) <- maw$study_id
+maw$study_id <- NULL
+maw_t <- as.data.frame(t(maw))
+#filter
+maw_t <- maw_t[which(rowSums(maw_t==0)<(length(maw_t)*0.9)),]
+dim(maw_t) #26 prevalent species left at 0.99, or 8 at my standard 0.9
+maw_t #great, all names present
+
+identical(colnames(maw_t), meta1_maw$study_id) #lovely
+
+##SAVE THIS FILE so I don't have to keep generating it pointlessly.
+#write.csv(maw_t, "/ebio/abt3_projects2/uHEAT/data/Medi/maw_t_2025.05.29.csv")
+
+#multiple wilcoxons - Fever by Foods
+MW.p = apply(maw_t,1,
+             function(x) wilcox.test(c(x)~meta1_maw$cv19a1_vaceffects_list___3)$p.value)
+MW.coef = apply(maw_t,1,
+                function(x) wilcox.test(c(x)~meta1_maw$cv19a1_vaceffects_list___3)$statistic)
+pres <- data.frame(SampleID=names(MW.p), pval=MW.p, coef=MW.coef)
+pres$qval <- p.adjust(pres$pval, method='fdr')
+head(pres[order(pres$pval),]) 
+results_FoodsFever <- pres[order(pres$qval),] %>% filter(pval<0.05)
+results_FoodsFever #nothing that passes qval, q~0.2 so not super believable
+#top hit is barley (?) and second is banana, at the 0.99 cutoff; nothing at the standard 0.9 cutoff
+
+```
+
+```{r hum3}
+#genes - stratified
+hm3_genes_strat <- fread("/ebio/abt3_projects2/CHILD_uHEAT/data/LLMGP/humann3/normalized/stratified/regroup/annot/genefamilies_uniref50_default.tsv")
+names(hm3_genes_strat) <- gsub("_Abundance-RPKs", "", names(hm3_genes_strat), fixed=TRUE)
+
+hm3_genes_strat <- hm3_genes_strat %>% rename(Gene=`# Gene Family`)
+
+#pick true flagellins only
+flag <- hm3_genes_strat[grep("Flagellin", hm3_genes_strat$annotation),]
+flag %>% select(Gene, annotation) %>% as.data.frame() %>% head(50)
+flag[grep("FliC", flag$annotation),] #The FliC3 labelled one is Acetatifactor but very sparse
+#get rid of the massive original file
+hm3_genes_strat <- NULL
+
+row.names(flag) <- flag$Gene
+flag_M <- flag %>% as.data.frame %>% select(-c("annotation", "Gene"))
+head(flag_M)
+names(flag_M) <- paste("X", names(flag_M), sep="")
+
+meta1 <- meta1[order(meta1$SeqID),] #order
+flag_M <- flag_M[,which(names(flag_M) %in% meta1$SeqID)]
+meta1 <- meta1[which(meta1$SeqID %in% names(flag_M)),]
+flag_M <- flag_M[,order(names(flag_M))] #order
+identical(names(flag_M), meta1$SeqID)
+row.names(meta1) <- meta1$SeqID
+row.names(flag_M) <- flag$Gene
+dim(flag_M) #807 flagellins, 512 ppl. It's not SO crazy.
+
+#Test vs. fever.
+fit_data = Maaslin2(
+  input_data = flag_M, 
+  input_metadata = meta1, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth", "cv19a1_vaceffects_list___3"),
+  random_effects = c("study_id"), 
+  #reference=c("Sex", "m"), #tell it to use plate 1 as the ref for plate compare / male as ref for Sex
+  normalization="tss", #total sum scaling
+  #min_abundance=0.00001, #no abundance threshold here?
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+flag_fevergenes <- fit_data$results %>% filter(qval<0.05)
+flag_fevergenes %>% filter(metadata=="cv19a1_vaceffects_list___3") #no hits...
+hits7 <- flag_fevergenes %>% filter(metadata=="cv19a1_vaceffects_list___3")
+hits7b <- fit_data$results %>% filter(pval<0.05&metadata=="cv19a1_vaceffects_list___3") #slightly more relaxed?
+hits7b #wow, even at raw pval no hits. But of course it isn't transcriptomic...
+
+flag_maaslin_annot %>% filter(Gene %in% hits7b$feature) #one is regulatory, the rest are structural
+
+```

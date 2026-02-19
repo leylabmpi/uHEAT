@@ -45,6 +45,11 @@ count(meta, Diet3) %>% as.data.frame %>% mutate(perc=n/sum(n)*100) #n=46 veg (27
 
 #country of origin
 count(meta, Country_of_origin) %>% as.data.frame %>% mutate(perc=n/sum(n)*100)
+#geography of country of origin
+#European / non-European country of origin
+meta$Country_of_origin3 <- ifelse(meta$Country_of_origin %in% c("Germany", "Switzerland", "Italy", "Greece",
+                                                                "Bulgaria"), "European", "non-European")
+count(meta, Country_of_origin3) %>% as.data.frame %>% mutate(perc=n/sum(n)*100)
 
 #which dose?
 count(meta, Vaccine_StudyDose) %>% as.data.frame %>% mutate(perc=n/sum(n)*100)
@@ -61,12 +66,39 @@ count(meta, LastFeverAny) %>% as.data.frame %>% mutate(perc=n/sum(n)*100)
 #study fever
 count(meta, fever7d_aboveavg) %>% as.data.frame %>% mutate(perc=n/sum(n)*100)
 
-#export the relevant metadata for Table S1
+#post-vaccine antibodies
+count(meta, IgG_B2_aboveavg) %>% as.data.frame %>% mutate(perc=n/sum(n)*100)
+
+#overlap between fever and antibody categories
+count(meta, fever7d_aboveavg, IgG_B2_aboveavg) %>% as.data.frame %>% mutate(perc=n/sum(n)*100)
+
+#export the relevant metadata for Table S1 #decided to keep geography excluded due to identity concerns
 meta_export <- meta %>% dplyr::select(Participant_ID, Sex, Age, Diet, Vaccine_StudyDose, StudyVaccine_Type, 
                                Vaccine1_Type, Vaccine2_Type, fever7d, fever7d_aboveavg,
                                IgG_B1, IgG_B2,
                                Antipyretic_yn, num_symptoms, LastFeverAny)
-#write.csv(meta_export, "/ebio/abt3_projects2/uHEAT/data/SupplementalTables/S#_metadata.csv")
+#flag samples used for rnaseq, mouse and organoid experiments
+#rnaseq metadata
+meta_seq_rna <- read.csv("/ebio/abt3_projects2/uHEAT2/data/metadata/meta_seq_rna_fever7d_series1_24.08.18.csv") 
+#mouse metadata
+mouse_meta <- read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/wt_fmt_metadata.csv")
+mouse_meta
+mouse_meta$Participant_ID <- sapply(strsplit(mouse_meta$SampleID,"_"), `[`, 1)
+mouse_meta$Participant_ID <- gsub("H", "HEAT_", mouse_meta$Participant_ID)
+#organoid metadata
+organoids <- read.csv("/ebio/abt3_projects2/uHEAT/data/Organoid_RNAseq/OrganoidIL8All.csv")
+meta_export$RNA_seq <- ifelse(meta_export$Participant_ID %in% meta_seq_rna$Participant_ID, "y", "n")
+meta_export$Fecal_donor_organoid <- ifelse(meta_export$Participant_ID %in% organoids$Participant_ID, "y", "n")
+meta_export$Fecal_donor_mouse <- ifelse(meta_export$Participant_ID %in% organoids$mouse_meta, "y", "n")
+#add calprotectin ELISA data to table S1
+calpro <- read.csv("/ebio/abt3_projects2/uHEAT/data/SupplementalTables/S#_Calpro.csv", row.names=1)
+calpro <- calpro %>% dplyr::select(Participant_ID, Calpro.pg.mL)
+#add serum cholesterol data to table S1
+chol <- read.csv("/ebio/abt3_projects2/uHEAT2/data/cholesterol/Cholesterol_clean.csv", row.names=1)
+chol <- chol %>% dplyr::select(Participant_ID, HDL_Cholesterol_mg.dL, LDL_Cholesterol_mg.dL)
+#join
+meta_export <- Reduce(full_join, list(meta_export, calpro, chol))
+#write.csv(meta_export, "/ebio/abt3_projects2/uHEAT/data/SupplementalTables/S1_metadata_revised.csv")
 
 meta_seq_export <- meta_seq %>% dplyr::select(Participant_ID, SampleID, Bristol_Stool_Score, seq_depth, Time01, Time_at_RT)
 #write.csv(meta_seq_export, "/ebio/abt3_projects2/uHEAT/data/SupplementalTables/S#_metadata_persample.csv")
@@ -108,24 +140,43 @@ summary(pdata$Temperature)
 pdata$fever7d_aboveavg <- factor(pdata$fever7d_aboveavg, levels=c("lo", "hi"))
 
 #plot Fig 1B
-cairo_pdf(width=5, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/1B.Temperature.pdf")
+#cairo_pdf(width=5, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/1B.Temperature.pdf")
 p <- ggplot(pdata, aes(x=Time01, y=Temperature, colour=fever7d_aboveavg)) + geom_point(alpha=0.3) + geom_line(aes(group=Participant_ID), alpha=0.1) +
 xlab("Time (days)") + ylab("Temperature (ºC)") + 
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
                panel.background = element_blank(), axis.line = element_line(colour = "black"),
                axis.title.y = element_text(margin = margin(r = 10))) + 
   scale_colour_manual(values=c("grey80", "firebrick3")) + 
-  labs(colour = "∆T") + 
+  labs(colour = "Fever") + 
   annotate("segment", x=0, xend=0, y=34, yend=38.5, linetype=1) + 
   annotate("text", label="Vaccine", x=0, y=39) + 
   scale_x_continuous(breaks = (seq(-7, 7, by = 7))) +
     guides(colour = guide_legend(override.aes = list(alpha=1)))
 p
-dev.off()
+#dev.off()
 
 #export pdata for supplementary table
 pdata_export <- pdata %>% dplyr::select(Participant_ID, Relative_Day, Time01, Temperature)
 #write.csv(pdata_export, "/ebio/abt3_projects2/uHEAT/data/SupplementalTables/S#_Temperature.csv")
+
+###additionally plot by diet: Veg/Omni
+pdata$Diet3 <- factor(pdata$Diet3, levels=c("Veg", "Omni"))
+
+#cairo_pdf(width=5, height=3, "/ebio/abt3_projects2/uHEAT/data/plots5/2B.Temperature_DIET.pdf")
+p <- ggplot(pdata, aes(x=Time01, y=Temperature, colour=Diet3)) + geom_point(alpha=0.3) + geom_line(aes(group=Participant_ID), alpha=0.1) +
+xlab("Time (days)") + ylab("Temperature (ºC)") + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  scale_colour_manual(values=c("seagreen3", "salmon3")) + 
+  labs(colour = "Fever") + 
+  annotate("segment", x=0, xend=0, y=34, yend=38.5, linetype=1) + 
+  annotate("text", label="Vaccine", x=0, y=39) + 
+  scale_x_continuous(breaks = (seq(-7, 7, by = 7))) +
+    guides(colour = guide_legend(override.aes = list(alpha=1)))
+p
+#dev.off()
+
 
 ```
 
@@ -157,6 +208,9 @@ summary(test)
 
 posthoc <- TukeyHSD(test)
 posthoc
+
+#what is the median BASELINE temperature?
+summary(pdata3$Temperature) #36.5ºC, same as in total dataset
 
 #cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/1C.CircadianRhythm.pdf")
 p <- ggplot(pdata3, aes(x=as.factor(Time_of_Day_v3), y=Temperature)) + geom_boxplot(outlier.color = NA, outlier.shape=NA) +
@@ -192,7 +246,7 @@ p
 #S1B - oral contraceptives
 pdata <- meta %>% filter(Sex=="f")
 length(pdata$Participant_ID)
-wilcox.test(pdata$median_base~pdata$Hormonal_contraceptive) 
+wilcox.test(pdata$median_base~pdata$Hormonal_contraceptive) #p=0.03
 
 #pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S1C.Contraceptive.pdf")
 p <- ggplot(pdata, aes(x=Hormonal_contraceptive, y=median_base)) + geom_boxplot()
@@ -202,8 +256,8 @@ p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_bl
                axis.title.y = element_text(margin = margin(r = 10)))
 #p <- p + ggtitle(paste(c("Women only (N="), length(pdata$Participant_ID), ")", sep=""))
 p <- p + annotate('segment', x=1, xend=2, y=37.05, yend=37.05)
-p <- p + annotate('text', label=c("*"), x=1.5, y=37.1)
-p <- p + xlab("Hormonal contraceptive") + ylab("Median Base. Temp. (ºC)")
+p <- p + annotate('text', label=c("*"), x=1.5, y=37.1, size=6)
+p <- p + xlab("Hormonal contraceptive") + ylab("T"[baseline]~"(ºC)")
 p
 #dev.off()
 
@@ -245,6 +299,74 @@ wilcox.test(meta$median_base~meta$Chronic_disease_other) #NS
 
 meta_seq$fever7d_aboveavg <- factor(meta_seq$fever7d_aboveavg, levels=c("lo", "hi"))
 
+#smoothed histogram of fever ºC vs fever category
+#cairo_pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/1#.Fever_definition.pdf")
+p <- ggplot(meta, aes(x=fever7d, fill=fever7d_aboveavg)) + geom_density(alpha=0.5) +
+  theme_minimal() +
+  scale_fill_manual(values=c("grey50", "firebrick3")) +
+  xlab("∆T (ºC)") + ylab("Density") + labs(fill="Fever")
+p
+#dev.off()
+
+#versus a boxplot because the hist shows overlap which doesn't exist
+p <- ggplot(meta, aes(x=fever7d_aboveavg, y=fever7d)) + geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0) +
+  annotate('segment', x=0.5, xend=2.5, y=0.78, yend=0.78, linetype='dashed')
+p
+
+#fixing the histogram so that the TRUE distribution is shown - no smoothing
+densities <- meta %>%
+  group_by(fever7d_aboveavg) %>%
+  tidyr::nest() %>%
+  mutate(density = map(data, ~ {
+    d <- density(.x$fever7d, from = min(.x$fever7d), to = max(.x$fever7d))
+    tibble(x = d$x, y = d$y)
+  })) %>%
+  select(-data) %>%
+  unnest(density)
+densities$fever7d_aboveavg <- factor(densities$fever7d_aboveavg, levels=c("lo", "hi"))
+
+#cairo_pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/1B.Fever_definition.pdf")
+p <- ggplot(densities, aes(x = x, y = y, fill = fever7d_aboveavg)) +
+  geom_area(alpha = 0.5, colour='black') +
+  theme_minimal() +
+  scale_fill_manual(values = c("grey50", "firebrick3")) +
+  xlab("∆T (ºC)") +
+  ylab("Density") +
+  labs(fill = "Fever") +
+  annotate('segment', x=mean(meta$fever7d), xend=mean(meta$fever7d), y=0, yend=2.5, linetype='dashed')
+p
+#dev.off()
+
+#making an analagous histogram but for IgGB2 categories
+#fixing the histogram so that the TRUE distribution is shown - no smoothing
+densities <- meta %>%
+  dplyr::group_by(IgG_B2_aboveavg) %>%
+  tidyr::nest() %>%
+  dplyr::mutate(density = map(data, ~ {
+    d <- density(.x$IgG_B2, from = min(.x$IgG_B2), to = max(.x$IgG_B2))
+    tibble(x = d$x, y = d$y)
+  })) %>%
+  dplyr::select(-data) %>%
+  unnest(density)
+densities$IgG_B2_aboveavg <- factor(densities$IgG_B2_aboveavg, levels=c("lo", "hi"))
+#adjust the units to the NIBSC international standard
+#150 000 units/mL of the kit is comparable to 364.5 mU binding antibody units/mL NIBSC Standard 
+densities$x2 <- densities$x * (364.5/150000)
+
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/1B.IgGB2_definition.pdf")
+p <- ggplot(densities, aes(x = x2, y = y, fill = IgG_B2_aboveavg)) +
+  geom_area(alpha = 0.5, colour='black') +
+  theme_minimal() +
+  scale_fill_manual(values=c("skyblue", "skyblue4")) +
+  xlab("Anti-SARS-CoV2 IgG (mU/mL)") +
+  ylab("Density") +
+  labs(fill = "IgG") +
+  annotate('segment', x=mean(meta$IgG_B2)* (364.5/150000), xend=mean(meta$IgG_B2)* (364.5/150000), y=0, yend=7.5e-09, linetype='dashed')
+p
+#dev.off()
+
+
 #S1D - fever by # of symptoms
 cor.test(meta$fever7d,meta$num_symptoms, method='spearman') 
 
@@ -257,6 +379,25 @@ p <- ggplot(meta, aes(x=fever7d, y=num_symptoms)) + geom_point() + geom_smooth(m
   annotate('text', label=c("p=2.0e-06\nrho=0.35"), hjust=0, x=1.7, y=1)
 p
 #dev.off()
+
+#later for Table S#: total of each type of symptoms
+symptom_cols <- names(meta)[grep("_yn", names(meta))]
+tableS <- meta %>% select(symptom_cols)
+# Tidy summarization
+summary_df <- tableS %>%
+  pivot_longer(cols = everything(), names_to = "feature", values_to = "response") %>%
+  filter(!is.na(response)) %>%
+  count(feature, response) %>%
+  group_by(feature) %>%
+  mutate(percent = n / sum(n) * 100) %>%
+  ungroup()
+print(summary_df)
+summary_df$response <- case_when(summary_df$response=="n"~"no",
+                                 summary_df$response=="no"~"no",
+                                 summary_df$response=="y"~"yes",
+                                 summary_df$response=="yes"~"yes")
+summary_df2 <- summary_df %>% pivot_wider(names_from=response, values_from=(c(n, percent)))
+#write.csv(summary_df2, "/ebio/abt3_projects2/uHEAT/data/metadata/TableS#_symptoms_summary.csv")
 
 #replot: fever by # of symptoms as a box plot.
 #cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/1E.Symptoms_v2.pdf")
@@ -274,6 +415,26 @@ p
 
 kruskal.test(meta$fever7d~as.factor(meta$num_symptoms)) #yes, very significant also.
 
+#reviewer question: do any of the other symptoms correlate with diet? #as categorical (fisher test) or # days
+fisher.test(meta$fever7d_aboveavg, meta$Diet3) #p=0.03 #sanity check
+fisher.test(meta$num_symptoms, meta$Diet3) #NS
+fisher.test(meta$headache_yn, meta$Diet3) #NS
+wilcox.test(meta$headache_days~meta$Diet3) #NS
+fisher.test(meta$chills_yn, meta$Diet3) #NS
+wilcox.test(meta$chills_days~meta$Diet3) #NS
+fisher.test(meta$aches_yn, meta$Diet3) #NS
+wilcox.test(meta$aches_days~meta$Diet3) #NS
+fisher.test(meta$fatigue_yn, meta$Diet3) #p=0.048
+dplyr::count(meta, fatigue_yn, Diet3) %>% mutate(per=n/sum(n)*100) #in the UNEXPECTED direction in that more of the fatigue+ people were veg
+wilcox.test(meta$fatigue_days~meta$Diet3) #NS
+fisher.test(meta$diarrhea_yn, meta$Diet3) #NS
+fisher.test(meta$appetite_yn, meta$Diet3) #NS
+#and baseline symptoms?
+fisher.test(meta$headache_yn_base, meta$Diet3) #NS
+fisher.test(meta$chills_yn_base, meta$Diet3) #NS
+fisher.test(meta$aches_yn_base, meta$Diet3) #NS
+fisher.test(meta$fatigue_yn_base, meta$Diet3) #p=0.003
+dplyr::count(meta, fatigue_yn_base, Diet3) %>% mutate(per=n/sum(n)*100) #indeed Veg+ were rather more likely at baseline to say they were tired (vs. omni)
 
 #S1E - fever7d by antipyretic usage
 pdata <- meta_seq %>% filter(!is.na(fever7d)) %>% filter(!duplicated(Participant_ID))
@@ -291,7 +452,7 @@ p <- ggplot(pdata, aes(x=vaccine_antipyretics_noNA, y=fever7d)) + geom_boxplot(o
   ylab("∆T (ºC)") + xlab("Antipyretics") + 
   scale_y_continuous(breaks = (seq(0, 2.5, by = 0.5))) +
   annotate('segment', x=1, xend=2, y=2.5, yend=2.5) + 
-  annotate('text', label=c("*"), x=1.5, y=2.6, size=5)
+  annotate('text', label=c("*"), x=1.5, y=2.6, size=6)
 p
 #dev.off()
 
@@ -316,6 +477,19 @@ p
 
 #hormonal contraceptives
 wilcox.test(meta.f$fever7d~meta.f$Hormonal_contraceptive) #NS
+
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S1C.ContraceptiveFever.pdf")
+p <- ggplot(meta.f, aes(x=Hormonal_contraceptive, y=fever7d)) + geom_boxplot()
+p <- p + geom_jitter(width=0.1, height=0)
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+#p <- p + ggtitle(paste(c("Women only (N="), length(pdata$Participant_ID), ")", sep=""))
+p <- p + annotate('segment', x=1, xend=2, y=2.5, yend=2.5)
+p <- p + annotate('text', label=c("NS"), x=1.5, y=2.6)
+p <- p + xlab("Hormonal contraceptive") + ylab("∆T (ºC)")
+p
+#dev.off()
 
 #study vaccine type
 #pdata <- meta %>% filter(meta$StudyVaccine_Type %in% c("BioNTech", "Moderna"))
@@ -395,6 +569,7 @@ meta$IgG_riseB1B2 <- (meta$IgG_B2-meta$IgG_B1) / (meta$IgG_B2+meta$IgG_B1)
 
 cor.test(meta$IgG_riseB1B2, meta$fever7d, method='spearman') #NS, in fact opposite trend.
 cor.test(meta$IgG_foldB1B2, meta$fever7d, method='spearman') #also NS & opposite trend
+wilcox.test(meta$IgG_foldB1B2~meta$fever7d_aboveavg)
 
 meta$fever7d_aboveavg <- factor(meta$fever7d_aboveavg, levels=c("lo", "hi"))
 
@@ -404,19 +579,37 @@ pdata$Antibody_Time2 <- ifelse(pdata$Antibody_Time=="IgG_B1", "D-7", "D14")
 pdata <- pdata %>% filter(!is.na(fever7d_aboveavg))
 pdata$fever7d_aboveavg <- factor(pdata$fever7d_aboveavg, levels=c("lo", "hi"))
 pdata$Antibody_Time2 <- factor(pdata$Antibody_Time2, levels=c("D-7", "D14"))
+#adjust the units to the NIBSC international standard
+#150 000 units/mL of the kit is comparable to 364.5 mU binding antibody units/mL NIBSC Standard 
+pdata$IgG_u2 <- pdata$IgG * (364.5/150000)
 
-#cairo_pdf(width=4, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/1F.Antibodies.pdf")
-p <- ggplot(pdata, aes(x=Antibody_Time2, y=log(IgG), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) +
+#cairo_pdf(width=4, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/1F.Antibodies.pdf")
+p <- ggplot(pdata, aes(x=Antibody_Time2, y=log(IgG_u2), colour=fever7d_aboveavg)) + geom_boxplot(outlier.shape=NA) +
   geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0)) + 
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
                panel.background = element_blank(), axis.line = element_line(colour = "black"),
                axis.title.y = element_text(margin = margin(r = 10))) + 
-  xlab("Time (days)") + ylab("Anti-SARS-CoV2 IgG (Log U/mL)")+ labs(colour="∆T") + 
+  xlab("Time (days)") + ylab("Anti-SARS-CoV2 IgG (Log mU/mL)")+ labs(colour="Fever") + 
   scale_colour_manual(values=c("grey50", "firebrick3")) + 
-  annotate('segment', x=0.75, xend=1.25, y=20.5, yend=20.5) + 
-  annotate("text", x=1, y=21, label=c("*"), size=5) + 
-  annotate('segment', x=1.75, xend=2.25, y=21.5, yend=21.5) + 
-  annotate("text", x=2, y=22, label=c("*"), size=5)
+  annotate('segment', x=0.75, xend=1.25, y=15.5, yend=15.5) + 
+  annotate("text", x=1, y=16, label=c("*"), size=5) + 
+  annotate('segment', x=1.75, xend=2.25, y=15.5, yend=15.5) + 
+  annotate("text", x=2, y=16, label=c("*"), size=5)
+p
+#dev.off()
+
+#relative increase in antibodies.
+pdata <- meta %>% filter(IgG_foldB1B2!="Inf") #remove the ones who had no starting value.
+
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S1D.Antibodies.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=log(IgG_foldB1B2))) + geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab("Fever") + ylab("SARS-CoV2 IgG (Log Fold Change)") +
+  annotate('segment', x=1, xend=2, y=5.5, yend=5.5) + 
+  annotate("text", x=1.5, y=6, label=c("NS"))
 p
 #dev.off()
 
@@ -469,14 +662,23 @@ pdata %>% dplyr::select(LastVaccines_Fever_y.n, LastFever4, LastFeverAny, LastFe
 
 wilcox.test(pdata$fever~pdata$LastFever_NonVaccine) #NS
 
+#is this relationship affected by covariates such as antibodies, in a general linear model.
+pdata$LastFeverAny_binary <- ifelse(pdata$LastFeverAny=="yes", 1, 0)
+m1 <- glm(LastFeverAny_binary ~ fever7d_aboveavg, data=pdata)
+summary(m1) #***
+
+m2 <- glm(LastFeverAny_binary ~ IgG_B1 + fever7d_aboveavg, data=pdata)
+summary(m2) #**
+
+m3 <- glm(LastFeverAny_binary ~ IgG_B1 + Time_Since_Last_Vaccine + Vaccine_StudyDose + Vaccine1_Type + Vaccine2_Type + StudyVaccine_Type + fever7d_aboveavg, data=pdata)
+summary(m3) #**
+
 ```
 
 ```{r Fever vs Diet}
 
 #1D - fever7d by diet (2)
 pdata <- meta %>% filter(!is.na(fever7d_aboveavg))
-pdata$Diet2 <- factor(pdata$Diet2, levels=c("Veg", "Omni"))
-wilcox.test(pdata$fever7d~pdata$Diet2) #p=0.0007
 
 #DIET3!!
 pdata$Diet3 <- factor(pdata$Diet3, levels=c("Veg", "Omni"))
@@ -495,6 +697,14 @@ p <- ggplot(pdata, aes(x=Diet3, y=fever7d)) + geom_boxplot(outlier.shape=NA, out
 p
 #dev.off()
 
+#what is the effect size in terms of ºC?
+pdata_veg <- pdata %>% filter(Diet3=="Veg")
+pdata_omni <- pdata %>% filter(Diet3=="Omni")
+
+summary(pdata_veg$fever7d)
+summary(pdata_omni$fever7d)
+sd(pdata$fever7d)
+
 #Diet: lm controlling for covariates 
 summary(lm(fever7d ~ Sex + Age + BMI_kg_m2 + Vaccine_StudyDose + StudyVaccine_Type + LastFeverAny + Diet2, data=pdata))
 summary(lm(fever7d ~ Sex + Age + BMI_kg_m2 + Vaccine_StudyDose + StudyVaccine_Type + IgG_B1 + IgG_B2 + LastFeverAny + Diet2, data=pdata))
@@ -506,6 +716,20 @@ summary(lm(fever7d ~ Sex + Age + BMI_kg_m2 + Vaccine_StudyDose + StudyVaccine_Ty
 summary(lm(fever7d ~ Sex + Age + BMI_kg_m2 + Vaccine_StudyDose + StudyVaccine_Type + IgG_B1 + IgG_B2 + LastFeverAny + Diet3, data=pdata))
 summary(lm(fever7d ~ Sex + Age + BMI_kg_m2 + Vaccine_StudyDose + StudyVaccine_Type + Antipyretic_yn + IgG_B1 + IgG_B2 + LastFeverAny + Diet3, data=pdata)) #p=0.005
 summary(lm(fever7d ~ Sex + Age + LastFeverAny + Antipyretic_yn + Diet3, data=pdata))
+
+#Is the effect stronger in ppl with low starting antibodies?
+pdata$IgG_B1_aboveavg <- factor(pdata$IgG_B1_aboveavg, levels=c("lo", "hi"))
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/0G_FeverDiet_ByIgGLo.pdf")
+p <- ggplot(pdata, aes(x=Diet3, y=fever7d)) + geom_boxplot(outlier.shape=NA, outlier.size=NA) + 
+  geom_jitter(width=0.1, height=0) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+        scale_y_continuous(breaks = (seq(0, 2.5, by = 0.5))) +
+  ylab("∆T (ºC)") + xlab("Diet") +
+  facet_grid(.~IgG_B1_aboveavg)
+p
+#dev.off()
 
 
 #S1# - Diet - detailed
@@ -522,7 +746,7 @@ t <- aov(pdata$fever7d~pdata$Diet4)
 summary(t)
 TukeyHSD(t)
 
-#cairo_pdf(width=4, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S1D.Diet4_long.pdf")
+#cairo_pdf(width=3.5, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2B.Diet4_long.pdf")
 p <- ggplot(pdata, aes(x=Diet4, y=fever7d)) + geom_boxplot(outlier.shape=NA, outlier.size=NA) + 
   geom_jitter(width=0.1, height=0) + 
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
@@ -534,6 +758,44 @@ p <- ggplot(pdata, aes(x=Diet4, y=fever7d)) + geom_boxplot(outlier.shape=NA, out
   annotate('text', x=2.55, y=2.6, label=c("**"), size=5)
 p
 #dev.off()
+
+#make a 'venn-type' plot showing # of veg/omni in each category
+pdata$Diet4 <- factor(pdata$Diet4, levels = c("Vegan", "Vegetarian", "Pescetarian", "Omnivore"))
+pdata4 <- pdata %>%
+  count(fever7d_aboveavg, Diet4) %>%
+  group_by(fever7d_aboveavg) 
+pdata4$fever7d_aboveavg <- factor(pdata4$fever7d_aboveavg , levels=c("lo", "hi"))
+pdata4$pos <- c(NA, 65, NA, 25, 95, 75, NA, 25)
+
+#pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S2A_Diet_Fever_Categories.pdf")
+p <- ggplot(pdata4, aes(x=fever7d_aboveavg, y=n, fill=Diet4)) +
+  geom_bar(stat='identity', colour='black') +
+  geom_text(aes(y=pos, label=n), color = "black", size = 4) +  # position labels at 'pos'
+  scale_fill_manual(values=c("cyan3", "darkcyan", "lightsalmon", "salmon3")) +
+  xlab("Fever") + labs(fill="Diet") +
+  theme_bw()
+p
+#dev.off()
+
+#are there fewer vegetarians in the high-fever category (by total category)
+fisher.test(meta$fever7d_aboveavg, meta$Diet3) #p=0.03, yes
+
+#remake as a percentage
+pdata4 <- pdata4 %>% group_by(fever7d_aboveavg) %>% mutate(per=n/sum(n)*100) %>% ungroup()
+
+#pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/Diet_Fever_Categories_percent.pdf")
+p <- ggplot(pdata4, aes(x=fever7d_aboveavg, y=per, fill=Diet4)) +
+  geom_bar(stat='identity', colour='black') +
+  #geom_text(aes(y=pos, label=n), color = "black", size = 4) +  # position labels at 'pos'
+  scale_fill_manual(values=c("cyan3", "darkcyan", "lightsalmon", "salmon3")) +
+  xlab("Fever") + labs(fill="Diet") + ylab("%") +
+  theme_bw()
+p
+#dev.off()
+
+#are there fewer vegetarians in the high-fever category (by total category, percent)
+fisher.test(pdata4$fever7d_aboveavg, pdata4$Diet3) #NS
+
 
 ##check other metabolic markers because of diet association
 meta$Waist_circumference_byheight <- meta$Waist_circumference_cm / meta$Height_cm
@@ -569,53 +831,71 @@ pdata$Antibody_Time2 <- ifelse(pdata$Antibody_Time=="IgG_B1", "D-7", "D14")
 pdata$Antibody_Time2 <- factor(pdata$Antibody_Time2, levels=c("D-7", "D14"))
 pdata$Diet2 <- factor(pdata$Diet2, levels=c("Veg", "Omni"))
 pdata$Diet3 <- factor(pdata$Diet3, levels=c("Veg", "Omni"))
+#adjust the units to the NIBSC international standard
+#150 000 units/mL of the kit is comparable to 364.5 mU binding antibody units/mL NIBSC Standard 
+pdata$IgG_u2 <- pdata$IgG * (364.5/150000)
 
-#cairo_pdf(width=4, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/1I.Diet3_antibodies.pdf")
-p <- ggplot(pdata, aes(x=Antibody_Time2, y=log(IgG), colour=Diet3)) + geom_boxplot(outlier.shape=NA)  +
+#cairo_pdf(width=4, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/1I.Diet3_antibodies.pdf")
+p <- ggplot(pdata, aes(x=Antibody_Time2, y=log(IgG_u2), colour=Diet3)) + geom_boxplot(outlier.shape=NA)  +
   geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0)) + 
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
                panel.background = element_blank(), axis.line = element_line(colour = "black"),
                axis.title.y = element_text(margin = margin(r = 10))) + 
-  xlab("Time (days)") + ylab("Anti-SARS-CoV2 IgG (Log U/mL)") + labs(colour="Diet") + 
+  xlab("Time (days)") + ylab("Anti-SARS-CoV2 IgG (Log mU/mL)") + labs(colour="Diet") + 
   scale_colour_manual(values=c("darkcyan", "lightsalmon3")) + 
-  annotate('segment', x=0.75, xend=1.25, y=20.5, yend=20.5) + 
-  annotate("text", x=1, y=21, label=c("NS"), size=3) + 
-  annotate('segment', x=1.75, xend=2.25, y=21.5, yend=21.5) + 
-  annotate("text", x=2, y=22, label=c("NS"), size=3)
+  annotate('segment', x=0.75, xend=1.25, y=15.5, yend=15.5) + 
+  annotate("text", x=1, y=16, label=c("ns")) + 
+  annotate('segment', x=1.75, xend=2.25, y=15.5, yend=15.5) + 
+  annotate("text", x=2, y=16, label=c("ns"))
 p
 #dev.off()
 
-#max temperature by diet within each gender
-wilcox.test(meta.f$max7d~meta.f$Diet2) #p=0.01
-wilcox.test(meta.m$max7d~meta.m$Diet2) #p=0.2, NS
+#antibody fold changes
+wilcox.test(meta$IgG_riseB1B2~meta$Diet3) #NS
+wilcox.test(meta$IgG_foldB1B2~meta$Diet3) #NS
 
+pdata <- meta %>% filter(IgG_foldB1B2!="Inf") #remove the ones who had no starting value.
+pdata$Diet3 <- factor(pdata$Diet3, levels=c("Veg", "Omni"))
+cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S1G.AntibodiesDiet.pdf")
+p <- ggplot(pdata, aes(x=Diet3, y=log(IgG_foldB1B2))) + geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab("Diet") + ylab("SARS-CoV2 IgG (Log Fold Change)") +
+  annotate('segment', x=1, xend=2, y=5.5, yend=5.5) + 
+  annotate("text", x=1.5, y=6, label=c("NS"))
+p
+dev.off()
+
+
+#max temperature by diet within each gender
 wilcox.test(meta.f$max7d~meta.f$Diet3) #p=0.01
 wilcox.test(meta.m$max7d~meta.m$Diet3) #p=0.2, NS
 
 #but the trend is the same for both f and m - higher in omnivores
-p1 <- ggplot(meta, aes(x=Sex, y=max7d, colour=Diet2)) + geom_boxplot(outlier.shape=NA)  +
+pdata <- meta %>% filter(Sex %in% c("m", "f"))
+pdata$Diet3 <- factor(pdata$Diet3, levels=c("Veg", "Omni")) #during revisions I just swapped the order because I realized omni was green in this figure by mistake
+#cairo_pdf(width=4, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/S2B.DietMaxTemp.pdf")
+p2 <- ggplot(pdata, aes(x=Sex, y=max7d, colour=Diet3)) + geom_boxplot(outlier.shape=NA) +
   geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0)) + 
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
                panel.background = element_blank(), axis.line = element_line(colour = "black"),
                axis.title.y = element_text(margin = margin(r = 10))) + 
-  scale_colour_manual(values=c("darkcyan", "lightsalmon3"))
-p1
-
-p2 <- ggplot(meta, aes(x=Sex, y=max7d, colour=Diet3)) + geom_boxplot(outlier.shape=NA) +
-  geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0)) + 
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
-               panel.background = element_blank(), axis.line = element_line(colour = "black"),
-               axis.title.y = element_text(margin = margin(r = 10))) + 
-  scale_colour_manual(values=c("darkcyan", "lightsalmon3"))
+  scale_colour_manual(values=c("darkcyan", "lightsalmon3")) +
+  ylab("Tmax (ºC)") + labs(colour="Diet")
 p2
+#dev.off()
+
 
 p <- ggplot(meta, aes(x=Sex, y=fever7d, colour=Diet3)) + geom_boxplot(outlier.shape=NA) +
   geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0)) + 
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
                panel.background = element_blank(), axis.line = element_line(colour = "black"),
                axis.title.y = element_text(margin = margin(r = 10))) + 
-  scale_colour_manual(values=c("darkcyan", "lightsalmon3"))
+  scale_colour_manual(values=c("darkcyan", "lightsalmon3")) 
 p
+
 
 #similarly, check fever by diet within each vaccine dose / type to ensure the trend is the same.
 p <- ggplot(meta, aes(x=StudyVaccine_Type, y=fever7d, colour=Diet3)) + geom_boxplot(outlier.shape=NA)  +

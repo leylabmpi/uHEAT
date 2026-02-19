@@ -1,0 +1,350 @@
+---
+title: "10.TLRs.ELISAs"
+author: "Kelsey Huus"
+date: "2024-08-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+##Packages
+library(dplyr)
+library(ggplot2)
+#library(data.table)
+library(tidyr)
+```
+
+```{r import}
+#per-sample metadata #note: mocks, blanks & samples with low read depth already excluded #so are old & infected samples
+meta_seq <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/meta_seq_clean_series1.24.08.18.csv", 
+                     row.names=1)
+
+#per-person metadata, matching
+meta <- meta_seq %>% filter(!duplicated(Participant_ID)&!is.na(fever7d_aboveavg)) %>%
+  dplyr::select(-c(SampleID, Relative_Day, Time0, Time01))
+dim(meta)
+#define DIET 3
+meta$Diet3 <- ifelse(meta$Diet %in% c("Vegan", "Vegetarian"), yes="Veg", no="Omni")
+meta_seq$Diet3 <- ifelse(meta_seq$Diet %in% c("Vegan", "Vegetarian"), yes="Veg", no="Omni")
+
+#tlr and elisa data
+tlr_elisa <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/ELISA_TLR_all.csv", row.names=1)
+head(tlr_elisa)
+
+pdata <- full_join(tlr_elisa, meta, by="Participant_ID")
+pdata <- pdata %>% filter(!is.na(fever7d_aboveavg))
+pdata$fever7d_aboveavg <- factor(pdata$fever7d_aboveavg, levels=c("lo", "hi"))
+
+```
+
+```{r tlr5}
+#tlr5 data only, checking technical variation.
+tlr5_raw <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/TLR5_Reporters_Interpolations_forR_withplateinfo.csv")
+tlr5_raw$Batch.Plate <- paste(tlr5_raw$Batch, tlr5_raw$Plate, sep=".")
+tlr5_raw$Participant_ID <- sapply(strsplit(tlr5_raw$SampleID,"_"), `[`, 1)
+tlr5_raw$Participant_ID <- gsub("H", "HEAT_", tlr5_raw$Participant_ID)
+tlr5_raw$Sample_no <- sapply(strsplit(tlr5_raw$SampleID,"_"), `[`, 2)
+
+#duplicates - which implies a freeze-thaw. #some were done as a test, some were done because original sample was above or below the LOD
+dups <- tlr5_raw[which(duplicated(tlr5_raw$Participant_ID)),]
+
+#version with no out-of-range samples
+tlr5_raw_no_LOD <- tlr5_raw %>% filter(!(FliC_equivalents_µg.mL_imputed%in%c("Below", "Above")))
+tlr5_raw_no_LOD$FliC_equivalents_µg.mL_imputed <- as.numeric(tlr5_raw_no_LOD$FliC_equivalents_µg.mL_imputed)
+  
+#batch effect #I mean it's not so bad honestly
+p <- ggplot(tlr5_raw_no_LOD, aes(x=as.factor(Batch), y=as.numeric(FliC_equivalents_µg.mL_imputed))) + geom_boxplot() +
+  geom_jitter(width=0.1, height=0)
+p
+kruskal.test(tlr5_raw_no_LOD$FliC_equivalents_µg.mL_imputed~as.factor(tlr5_raw_no_LOD$Batch)) #p=0.002 though
+
+p <- ggplot(tlr5_raw_no_LOD, aes(x=as.factor(Batch.Plate), y=as.numeric(FliC_equivalents_µg.mL_imputed))) + geom_boxplot() +
+  geom_jitter(width=0.1, height=0)
+p
+kruskal.test(tlr5_raw_no_LOD$FliC_equivalents_µg.mL_imputed~as.factor(tlr5_raw_no_LOD$Batch.Plate)) #p=0.002 though too
+
+#imputing values at the ends of the standard curve: below as 0.005, above as 5*2 (so 10) for normal diluted samples
+summary(tlr5_raw_no_LOD$FliC_equivalents_µg.mL_imputed)
+
+tlr5_raw$FliC_equivalents_µg.mL_imputed <- ifelse(tlr5_raw$FliC_equivalents_µg.mL_imputed=="Below",
+                                                  0.005, tlr5_raw$FliC_equivalents_µg.mL_imputed)
+tlr5_raw$FliC_equivalents_µg.mL_imputed <- ifelse(tlr5_raw$FliC_equivalents_µg.mL_imputed=="Above",
+                                                  10, tlr5_raw$FliC_equivalents_µg.mL_imputed)
+
+#now, check again by batch, better or worse?
+p <- ggplot(tlr5_raw, aes(x=as.factor(Batch), y=as.numeric(FliC_equivalents_µg.mL_imputed))) + geom_boxplot() +
+  geom_jitter(width=0.1, height=0)
+p
+kruskal.test(tlr5_raw$FliC_equivalents_µg.mL_imputed~as.factor(tlr5_raw$Batch)) #p=0.02 
+
+p <- ggplot(tlr5_raw, aes(x=as.factor(Batch.Plate), y=as.numeric(FliC_equivalents_µg.mL_imputed))) + geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0)
+p
+kruskal.test(tlr5_raw$FliC_equivalents_µg.mL_imputed~as.factor(tlr5_raw$Batch.Plate)) #p=0.009..
+
+#we could do a smarter imputation that is based on plate maxes and mins
+#check the duplicate variation here.
+tlr5_dups <- tlr5_raw %>% filter(Participant_ID %in% dups$Participant_ID)
+tlr5_dups$FliC_equivalents_µg.mL_imputed <- as.numeric(tlr5_dups$FliC_equivalents_µg.mL_imputed)
+tlr5_dups$Sample_no <- gsub("7 1:5", "7", tlr5_dups$Sample_no)
+
+pdata <- tlr5_dups %>%
+  filter(Participant_ID != "blank") %>%
+  mutate(FliC_equivalents_µg.mL_imputed = as.numeric(FliC_equivalents_µg.mL_imputed)) %>%
+  # For each biological sample, order the duplicates and assign dup1, dup2, etc
+  group_by(Participant_ID, Sample_no) %>%
+  arrange(Batch, .by_group = TRUE) %>%
+  mutate(dup_id = paste0("dup", row_number())) %>%
+  ungroup() %>%
+  dplyr::select(Participant_ID, Sample_no, dup_id, FliC_equivalents_µg.mL_imputed) %>%
+  pivot_wider(
+    names_from = dup_id,
+    values_from = FliC_equivalents_µg.mL_imputed)
+
+p <- ggplot(pdata, aes(x=log(dup1), y=log(dup2))) + geom_point() + geom_smooth(method='lm')
+p
+#the ones in the middle are actually fine, the imputations are obviously a mess
+
+#check the dups again, if we only use the "within LOD" samples
+tlr5_dups <- tlr5_raw_no_LOD %>% filter(Participant_ID %in% dups$Participant_ID)
+tlr5_dups$FliC_equivalents_µg.mL_imputed <- as.numeric(tlr5_dups$FliC_equivalents_µg.mL_imputed)
+tlr5_dups$Sample_no <- gsub("7 1:5", "7", tlr5_dups$Sample_no)
+
+pdata <- tlr5_dups %>%
+  filter(Participant_ID != "blank") %>%
+  mutate(FliC_equivalents_µg.mL_imputed = as.numeric(FliC_equivalents_µg.mL_imputed)) %>%
+  # For each biological sample, order the duplicates and assign dup1, dup2, etc
+  group_by(Participant_ID, Sample_no) %>%
+  arrange(Batch, .by_group = TRUE) %>%
+  mutate(dup_id = paste0("dup", row_number())) %>%
+  ungroup() %>%
+  dplyr::select(Participant_ID, Sample_no, dup_id, FliC_equivalents_µg.mL_imputed) %>%
+  pivot_wider(
+    names_from = dup_id,
+    values_from = FliC_equivalents_µg.mL_imputed)
+
+p <- ggplot(pdata, aes(x=log(dup1), y=log(dup2))) + geom_point() + geom_smooth(method='lm')
+p #yes, much cleaner, totally fine.
+
+#so let's make sure no outside-LOD samples; and we also exclude series 2, rather than average it
+tlr5_clean <- tlr5_raw_no_LOD %>% filter(Sample_no!=14 & !(Participant_ID %in% c("blank", "Blank")))
+duplicated(tlr5_clean$Participant_ID)  #there are still some technical duplicates
+duplicated(tlr5_clean$SampleID) 
+#to preserve batch information, take only one of the duplicates, instead of averaging; the first one with a real value
+tlr5_clean <- tlr5_clean %>% filter(!duplicated(Participant_ID))
+tlr5_clean$SampleID #ok
+
+#strip off the additional information in SampleID on dilution factor
+tlr5_clean$SampleID <- sapply(strsplit(tlr5_clean$SampleID," 1:5"), `[`, 1)
+tlr5_clean$SampleID <- sapply(strsplit(tlr5_clean$SampleID,"_neat"), `[`, 1)
+tlr5_clean$SampleID <- sapply(strsplit(tlr5_clean$SampleID,"_1:10"), `[`, 1)
+tlr5_clean$SampleID <- sapply(strsplit(tlr5_clean$SampleID,"_dup"), `[`, 1)
+tlr5_clean$SampleID
+
+#add the bss information for those samples, to estimate stool density
+bss <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/22-06-BSS-Metadata-clean1-forR-doublechecked-June2022.csv")
+bss <- bss %>% filter(Stool_ID==7)
+tlr5_bss <- tlr5_clean %>%
+  full_join(bss) %>% filter(!is.na(FliC_equivalents_µg.mL_imputed))
+
+#now: plot by fever of course, as before (should be similar)
+tlr5_bss_meta <- meta %>% dplyr::select(-c(Stool_ID, Date, Time, Bristol_Stool_Score, Comment)) %>%
+  full_join(tlr5_bss) %>%
+  filter(!is.na(Age)&!is.na(FliC_equivalents_µg.mL_imputed)) %>%
+  rename(TLR5=FliC_equivalents_µg.mL_imputed)
+
+tlr5_bss_meta$fever7d_aboveavg <- factor(tlr5_bss_meta$fever7d_aboveavg, levels=c("lo", "hi"))
+p <- ggplot(tlr5_bss_meta, aes(x=fever7d_aboveavg, y=log(TLR5))) + geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0) +
+  facet_grid(.~Batch.Plate)
+p
+#no, I mean, even by batch it's nonsense, although of course there is huge variability
+
+m1 <- lm(TLR5~fever7d_aboveavg, data=tlr5_bss_meta)
+summary(m1)
+
+m2 <- lme(TLR5~as.numeric(Bristol_Stool_Score) + fever7d_aboveavg, random=~1|Batch.Plate,
+          na.action=na.exclude,
+          data=tlr5_bss_meta)
+summary(m2) #NS still and in the wrong direction
+
+m2 <- lme(TLR5~as.numeric(Bristol_Stool_Score) + fever7d_aboveavg, random=~1|Batch.Plate,
+          na.action=na.exclude,
+          data=tlr5_bss_meta)
+summary(m2)
+
+#as per the organoids: exclude people with hormonal variation?
+tlr5_bss_meta$Sex_HC <- ifelse(tlr5_bss_meta$Sex=="f", yes=paste(tlr5_bss_meta$Sex, tlr_elisa_meta$Hormonal_contraceptive, sep="_"),
+                             no=(tlr5_bss_meta$Sex))
+tlr5_bss_meta$Fixed_temp <- ifelse(tlr5_bss_meta$Sex=="m" | (tlr5_bss_meta$Sex=="f"&tlr5_bss_meta$Hormonal_contraceptive=="y"), yes="fixed", no="variable")
+tlr5_bss_meta_fixed <- tlr5_bss_meta %>% filter(Fixed_temp=="fixed")
+
+p <- ggplot(tlr5_bss_meta_fixed, aes(x=fever7d_aboveavg, y=log(TLR5))) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.1, height=0) +
+  facet_grid(.~Batch.Plate)
+p
+#no, it's really enormously unconvincing
+
+#what if we control for levels of TLR5 detected in blood via somalogic?
+tlr5_blood = data.frame(tlr5_blood=soma_data_norm_baseline$seq.18935.14,
+                        ferritin_blood=soma_data_norm_baseline$seq.15324.58,
+                        Soma_SampleID=row.names(soma_data_norm_baseline)) 
+
+tlr5_blood <- soma_meta_baseline %>% dplyr::select(Participant_ID, Soma_SampleID) %>%
+  full_join(tlr5_blood) %>%
+  filter(!is.na(Soma_SampleID))
+
+tlr5_bss_meta_soma <- tlr5_bss_meta %>% full_join(tlr5_blood) %>%
+  filter(!is.na(fever7d_aboveavg))
+
+m3 <- lme(TLR5~as.numeric(Bristol_Stool_Score) + tlr5_blood + fever7d_aboveavg, random=~1|Batch.Plate,
+          na.action=na.exclude,
+          data=tlr5_bss_meta)
+summary(m3) #NS and still the wrong direction actually
+
+m3 <- lme(TLR5~as.numeric(Bristol_Stool_Score) + ferritin_blood + fever7d_aboveavg, random=~1|Batch.Plate,
+          na.action=na.exclude,
+          data=tlr5_bss_meta)
+summary(m3) #NS
+
+p <- ggplot(tlr5_bss_meta, aes(x=fever7d_aboveavg, y=tlr5_blood)) + geom_boxplot() +
+  geom_jitter(width=0.1, height=0)
+p
+
+p <- ggplot(tlr5_bss_meta_soma, aes(x=log(TLR5), y=tlr5_blood)) + geom_point() +
+  geom_smooth(method='lm')
+p #no correlation at all #and yet my multi-spearmans suggested one? did something go wrong?
+cor.test(tlr5_bss_meta_soma$TLR5, tlr5_bss_meta_soma$tlr5_blood, method='spearman') #NS at ALL
+
+#silly idea
+tlr5_bss_meta$TLR5_norm <- tlr5_bss_meta$TLR5 * tlr5_bss_meta$tlr5_blood
+p <- ggplot(tlr5_bss_meta, aes(x=fever7d_aboveavg, y=log(TLR5_norm))) + geom_boxplot() +
+  geom_jitter(width=0.1, height=0)
+p #no it's much worse
+
+p <- ggplot(tlr5_bss_meta, aes(x=fever7d_aboveavg, y=log(TLR5))) + geom_boxplot() +
+  geom_jitter(width=0.1, height=0) +
+  facet_grid(.~Diet3)
+p
+
+```
+
+
+```{r tlr plots}
+
+#TLR2
+wilcox.test(pdata$TLR2~pdata$fever7d_aboveavg)
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/4C.TLR2.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=TLR2)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + xlab("Fever") + ylab("Units") + ggtitle("TLR2")
+p <- p + annotate("segment", x=1, xend=2, y=24, yend=24)
+p <- p + annotate("text", x=1.5, y=26, label=c("NS"))
+p
+#dev.off()
+
+#TLR4
+wilcox.test(pdata$TLR4~pdata$fever7d_aboveavg)
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/4D.TLR4.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=TLR4)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + xlab("Fever") + ylab("Units LPS") + ggtitle("TLR4")
+p <- p + annotate("segment", x=1, xend=2, y=26, yend=26)
+p <- p + annotate("text", x=1.5, y=28, label=c("p=0.07"))
+p
+#dev.off()
+
+#TLR5
+wilcox.test(pdata$TLR5~pdata$fever7d_aboveavg)
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/4E.TLR5.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=TLR5)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10)))
+p <- p + xlab("Fever") + ylab("Units Flagellin") + ggtitle("TLR5")
+p <- p + annotate("segment", x=1, xend=2, y=27, yend=27)
+p <- p + annotate("text", x=1.5, y=29, label=c("NS"))
+p
+#dev.off()
+
+#combined TLR2 and TLR4
+pdata$TLR2TLR4 <- pdata$TLR2 + pdata$TLR4
+wilcox.test(pdata$TLR2TLR4~pdata$fever7d_aboveavg)
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=TLR2TLR4)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p
+
+#combined TLR2 and TLR4 and TLR5
+pdata$TLRs <- pdata$TLR2 + pdata$TLR4 + pdata$TLR5
+wilcox.test(pdata$TLRs~pdata$fever7d_aboveavg)
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=TLRs)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p
+
+
+```
+
+```{r antibody plots}
+#anti-flic antibodies average B1/B2
+wilcox.test(pdata$FliC_Binding~pdata$fever7d_aboveavg)
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S4C.FliCIgG.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=FliC_Binding)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab("Fever") + ylab("Anti-FliC IgG") +
+  annotate('segment', x=1, xend=2, y=1.05, yend=1.05) +
+  annotate('text', x=1.5, y=1.1, label=c("NS"))
+p
+#dev.off()
+
+#anti-flic antibodies, baseline (B1)
+wilcox.test(pdata$FliC_Binding_B1~pdata$fever7d_aboveavg)
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=FliC_Binding_B1)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p
+
+#anti-flic antibodies, postvaccine (B2)
+wilcox.test(pdata$FliC_Binding_B2~pdata$fever7d_aboveavg)
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=FliC_Binding_B2)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p
+
+#anti-fla antibodies average B1/B2
+wilcox.test(pdata$p15_Binding~pdata$fever7d_aboveavg)
+#cairo_pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S4D.p15IgG.pdf")
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=p15_Binding)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"),
+               axis.title.y = element_text(margin = margin(r = 10))) + 
+  xlab("Fever") + ylab("Anti-FliC1 IgG") +
+    annotate('segment', x=1, xend=2, y=0.55, yend=0.55) +
+  annotate('text', x=1.5, y=0.6, label=c("NS"))
+p
+#dev.off()
+
+#anti-fla antibodies, baseline (B1)
+wilcox.test(pdata$p15_Binding_B1~pdata$fever7d_aboveavg)
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=p15_Binding_B1)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p
+
+#anti-fla antibodies, postvaccine (B2)
+wilcox.test(pdata$p15_Binding_B2~pdata$fever7d_aboveavg)
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=p15_Binding_B2)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p
+
+#FliC antibody fold-change
+pdata$FliC_FoldChange <- pdata$FliC_Binding_B2 / pdata$FliC_Binding_B1
+wilcox.test(pdata$FliC_FoldChange~pdata$fever7d_aboveavg) #p=0.06
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=FliC_FoldChange)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p
+
+#p15 antibody fold-change
+pdata$p15_FoldChange <- pdata$p15_Binding_B2 / pdata$p15_Binding_B1
+wilcox.test(pdata$p15_FoldChange~pdata$fever7d_aboveavg) #p=0.07
+p <- ggplot(pdata, aes(x=fever7d_aboveavg, y=p15_FoldChange)) + geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0)
+p
+
+```

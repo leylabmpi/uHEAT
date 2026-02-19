@@ -1,0 +1,630 @@
+---
+title: "RV_taxa"
+author: "Kelsey Huus"
+date: "2024-12-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+##Packages
+library(tidyr)
+library(data.table)
+library(tidytable)
+library(dplyr)
+library(Maaslin2)
+library(ggplot2)
+```
+
+
+```{r metadata}
+#mouse metadata
+mouse_meta <- read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/wt_fmt_metadata.csv")
+mouse_meta
+mouse_meta$Participant_ID <- sapply(strsplit(mouse_meta$SampleID,"_"), `[`, 1)
+mouse_meta$Participant_ID <- gsub("H", "HEAT_", mouse_meta$Participant_ID)
+
+#study metadata
+#updated: this version also excludes SERIES 2 of all double series.
+meta_seq <- read.csv("/ebio/abt3_projects2/uHEAT/data/metadata/meta_seq_clean_series1.24.08.18.csv", 
+                     row.names=1)
+
+#define DIET 3
+meta_seq$Diet3 <- ifelse(meta_seq$Diet %in% c("Vegan", "Vegetarian"), yes="Veg", no="Omni")
+meta_seq$Diet3 <- factor(meta_seq$Diet3, levels=c("Veg", "Omni"))
+
+#per-person metadata, matching
+meta <- meta_seq %>% filter(!duplicated(Participant_ID)&!is.na(fever7d_aboveavg)) %>%
+  dplyr::select(-c(SampleID, Relative_Day, Time0, Time01))
+length(meta$Participant_ID) #final number of participants
+
+#combine metadata
+mouse_meta <- mouse_meta %>% dplyr::select(-c("SampleID")) %>% full_join(meta) %>%
+  filter(!is.na(Mice.ID_Tube))
+mouse_meta$Mice.ID_Tube <- paste("X", mouse_meta$Mice.ID_Tube, sep="") #make it compatible with bracken
+
+```
+
+```{r quick cytokine checks mouse}
+#tlr5 data etc.
+tlr5 <- read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/GF_TLR5interpolations_forR.csv")
+#obtain a compatible metadata
+#mouse metadata
+mouse_meta2 <- read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/wt_fmt_metadata.csv")
+mouse_meta2
+
+mouse_meta2$Participant_ID <- sapply(strsplit(mouse_meta2$SampleID,"_"), `[`, 1)
+mouse_meta2$Participant_ID <- gsub("H", "HEAT_", mouse_meta2$Participant_ID)
+
+mouse_meta2 <- mouse_meta2 %>% select(-c(dT_24h, IL6_24h, SampleID)) %>%
+  mutate(Genotype=c("wt"))
+mouse_meta3 <- mouse_meta2 %>% mutate(Genotype=c("dko"))
+mouse_meta2$Sample <- paste(mouse_meta2$Genotype, mouse_meta2$Mice.ID_Tube, sep="")
+mouse_meta3$Sample <- paste(mouse_meta3$Genotype, mouse_meta3$Mice.ID_Tube, sep="")
+
+mouse_meta_tlr5 <- Reduce(full_join, list(mouse_meta2, mouse_meta3, tlr5)) %>%
+  filter(!is.na(Mice.ID_Tube))
+#because I already deleted the genuinely NA samples, consider the remaining NA as 0
+mouse_meta_tlr5$FliC.ng.mL <- ifelse(is.na(mouse_meta_tlr5$FliC.ug.mL), yes=0, no=mouse_meta_tlr5$FliC.ng.mL)
+
+#how similar are replicates between me and Joseph? (WT T6, rep 1 and rep2)
+test <- mouse_meta_tlr5 %>% filter(Time=="T6"&Genotype=="wt")
+test <- test %>% select(Sample, FliC.ng.mL, Measurement) %>% pivot_wider(names_from=Measurement, values_from=FliC.ng.mL)
+p <- ggplot(test, aes(x=`1`, y=`2`)) + geom_point() + geom_smooth(method='lm')
+p #the scale is very off but generally they correspond
+
+#join with real meta to obtain fever data
+mouse_meta_tlr5 <- meta %>% select(Participant_ID, fever7d, fever7d_aboveavg) %>% 
+  full_join(mouse_meta_tlr5) %>%
+  filter(!is.na(FliC.ng.mL)&!is.na(Time))
+head(as.data.frame(mouse_meta_tlr5))
+
+#make an average per sample (across all 3 timepoints and any replicates per sample)
+mouse_tlr5_avg <- mouse_meta_tlr5 %>% group_by(Sample, fever7d_aboveavg, Genotype) %>%
+  summarize(FliC.ng.mL=mean(FliC.ng.mL))
+
+#plot
+mouse_tlr5_avg$fever7d_aboveavg <- factor(mouse_tlr5_avg$fever7d_aboveavg, levels=c("lo", "hi"))
+mouse_tlr5_avg$Genotype <- factor(mouse_tlr5_avg$Genotype, levels=c("wt", "dko"))
+p <- ggplot(mouse_tlr5_avg, aes(x=fever7d_aboveavg, y=FliC.ng.mL)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0) +
+  facet_grid(.~Genotype)
+p #ah it's so messy :( 
+
+wt <- mouse_tlr5_avg %>% filter(Genotype=="wt")
+wilcox.test(wt$FliC.ng.mL~wt$fever7d_aboveavg) #NS at all
+
+#plot all time points
+mouse_meta_tlr5$fever7d_aboveavg <- factor(mouse_meta_tlr5$fever7d_aboveavg, levels=c("lo", "hi"))
+mouse_meta_tlr5$Genotype <- factor(mouse_meta_tlr5$Genotype, levels=c("wt", "dko"))
+mouse_meta_tlr5$Time <- factor(mouse_meta_tlr5$Time, levels=c("T6", "T8", "T21"))
+p <- ggplot(mouse_meta_tlr5, aes(x=Time, y=FliC.ng.mL, colour=fever7d_aboveavg)) + 
+  geom_boxplot(outlier.shape=NA) + geom_point(position=position_jitterdodge(jitter.width=0.1, jitter.height=0)) +
+  facet_grid(.~Genotype) +
+  scale_colour_manual(values=c("grey", "darkred"))
+p
+
+#this data makes sense if the flagellin is responding to, not driving, the inflammation.
+
+#plot it actually per mouse
+p <- ggplot(mouse_meta_tlr5, aes(x=Time, y=FliC.ng.mL, colour=fever7d_aboveavg)) + 
+  geom_boxplot(outlier.shape=NA) + geom_point() + geom_line(aes(group=Sample)) +
+  facet_grid(.~Genotype) +
+  scale_colour_manual(values=c("grey", "darkred"))
+p
+
+#T21 WT seems promising but not sure this is fair to single out.
+sdata <- mouse_meta_tlr5 %>% filter(Genotype=="wt"&Time=="T21")
+wilcox.test(sdata$FliC.ng.mL~sdata$fever7d_aboveavg) #p=0.08 ugh
+
+#and as a ∆T over time?
+t5_baseline <- mouse_meta_tlr5 %>% filter(Time=="T6") %>% select(Sample, FliC.ng.mL) %>%
+  group_by(Sample) %>%
+  summarize(Baseline.FliC=mean(FliC.ng.mL)) #summarize across the 2 measurements
+mouse_meta_tlr5 <- mouse_meta_tlr5 %>% full_join(t5_baseline)
+mouse_meta_tlr5$DeltaT5 <- mouse_meta_tlr5$FliC.ng.mL - mouse_meta_tlr5$Baseline.FliC
+
+p <- ggplot(mouse_meta_tlr5, aes(x=Time, y=DeltaT5, colour=fever7d_aboveavg)) + 
+  geom_boxplot(outlier.shape=NA) + geom_point() + geom_line(aes(group=Sample)) +
+  facet_grid(.~Genotype) +
+  scale_colour_manual(values=c("grey", "darkred"))
+p
+
+#hm. Day 21 only? #now it's significant because everything is duplicated, boo.
+t5_d21 <- mouse_meta_tlr5 %>% filter(Time=="T21")
+
+#this does seem much cleaner
+p <- ggplot(t5_d21, aes(x=fever7d_aboveavg, y=FliC.ng.mL)) + 
+  geom_boxplot(outlier.shape=NA) + geom_jitter(width=0.1, height=0) +
+  facet_grid(.~Genotype)
+p
+
+#write out the table including summary etc. to look at in PRISM with the other mouse data.
+mouse_meta_tlr5 <- mouse_tlr5_avg %>% select(Sample, FliC.ng.mL) %>%
+  rename(Average_FliC=FliC.ng.mL) %>%
+  full_join(mouse_meta_tlr5)
+
+#write.csv(mouse_meta_tlr5, "/ebio/abt3_projects2/uHEAT/data/Mouse/GF_TLR5_summaries.csv")
+
+```
+
+
+```{r read_braken}
+#' Function for reading in a bracken taxonomy table
+#'
+#' The table will be converted to long form (sample ~ abundance).
+#' Only "_frac" or "_num" columns will be kept (see "keep_frac").
+#' Taxonomy will be split into separate levels (see "tax_levs").
+#' tidytable (w/ data.table) used to speed the process up.
+#'
+#' @param infile Path to bracken table file
+#' @param nrows Number of table rows to read. If Inf, all lines will be read.
+#' @param keep_frac If TRUE, keep all columns ending in "_frac"; otherwise, keep "_num" columns.
+#' @param tax_levs Taxonomic levels to separate the taxonomy column into.
+#' @param ... Params passed to fread()
+#' @return data.table
+#' @export
+#' @import tidytable
+#' @importFrom data.table fread
+#' 
+read_bracken = function(infile, nrows=Inf, keep_frac=TRUE,
+                        tax_levs = c('Domain', 'Phylum', 'Class', 'Order',
+                                     'Family', 'Genus', 'Species'),
+                        nThread = 4, ...){
+  if(keep_frac){
+    to_rm = '_num'
+    to_keep = '_frac'
+  } else {
+    to_rm = '_frac'
+    to_keep = '_num'
+  }
+  dt = data.table::fread(infile, sep='\t', nrows=nrows, check.names=TRUE,
+                         nThread=nThread, ...) %>%
+    tidytable::select(-taxIDs, -ends_with(!!to_rm)) %>%
+    tidytable::mutate(taxonomy = gsub(';[pcofgs]__', ';', taxonomy),
+                       taxonomy = gsub('^d__', '', taxonomy)) %>%
+    tidytable::separate(taxonomy, tax_levs, sep=';') %>%
+    tidytable::pivot_longer(cols=ends_with(!!to_keep),
+                               names_to='Sample',
+                               values_to='Abundance') %>%
+    tidytable::mutate(Sample = gsub('(_frac|_num)$', '', Sample))
+
+  return(dt)
+}
+
+```
+
+```{r import brk}
+#read in the brk_cls file
+##Read Files - rel abund
+#output of llmgp #update: instead, for re-analysis, read in the ids only or the filtered table only
+profile_dir <- "/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/profiling/kraken" #updated: no subsampling, GTDB map, all samples
+
+# reading tables
+brk_cls = "/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/profiling/kraken/all-combined-bracken.tsv" %>%
+  plyr::llply(read_bracken) %>%
+  data.table::rbindlist(use.names=TRUE, idcol='dataset')
+brk_cls
+names(brk_cls)
+
+#check the Abundance metric here, is it definitely relative?
+brk_cls %>% group_by(Sample) %>% summarize(sum(Abundance)) #yes! :)
+
+#keep a tax table
+tax <- brk_cls %>% dplyr::select(Domain, Phylum, Class, Order, Family, Genus, Species, taxonomy_id) %>%
+  filter(!duplicated(taxonomy_id))
+#write.csv(tax, "/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/profiling/kraken/tax_table.csv")
+
+```
+
+```{r barplots species}
+#move all but the 10 most abundant taxa into an 'others' category
+#but these are like WAY over-categorized to species level!
+taxa_to_keep <- brk_cls %>% group_by(Species) %>% 
+  summarize(abund=sum(Abundance)) %>%
+  filter(abund>0) 
+taxa_to_keep[order(taxa_to_keep$abund, decreasing=TRUE),]
+
+top_taxa <- (head(taxa_to_keep[order(taxa_to_keep$abund, decreasing=TRUE),], 25))$Species
+
+brk_cls$plot_taxa <- ifelse(brk_cls$Species %in% top_taxa,
+                               yes=brk_cls$Species,
+                               no="others")
+
+bar_plot <- brk_cls %>% 
+  group_by(Sample, plot_taxa) %>% 
+  summarize(Abundance=sum(Abundance))
+
+#make a barplot
+#define colours to use in plots #25 + others
+colours <- c("steelblue", "goldenrod1","forestgreen", "lightblue1", "lightpink", "red", 
+             "darkorchid3", "darkseagreen1", "khaki1",  "palevioletred", "darkturquoise", "honeydew4",
+             "gray95", "plum1", "blue",  "purple", "yellow", 
+             "green", "orange", "turquoise",
+             "chartreuse4", "thistle3", "firebrick3", "lightsteelblue2", "saddlebrown",
+             "black")
+
+#put the taxa in order so that "others" is last
+top_taxa_order <- c(top_taxa, "others")
+bar_plot$plot_taxa <- factor(bar_plot$plot_taxa,
+                               levels=top_taxa_order)
+
+#add metadata
+bar_plot <- bar_plot %>% rename(Mice.ID_Tube=Sample) %>%
+  full_join(mouse_meta)
+
+#basic bar plot
+bar_plot$fever7d_aboveavg <- factor(bar_plot$fever7d_aboveavg, levels=c("lo", "hi"))
+bar_plot$Mouse_ID <- factor(gsub("X", "", bar_plot$Mice.ID_Tube), levels=c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+                                                                           "11", "12", "13", "14", "15", "16", "17", "18", "19", "20",
+                                                                           "21", "22", "23", "24"))
+
+#pdf(width=10, height=5, "/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/plots/barplots_all_species.pdf")
+p <- ggplot(bar_plot, aes(Mouse_ID, Abundance, fill=plot_taxa)) + 
+  geom_bar(stat="identity", colour="black") +
+  facet_grid(. ~ fever7d_aboveavg, drop=FALSE,scale="free",space="free_x") + 
+  theme_bw() +
+  labs(x="Sample", y="Proportion") + 
+  scale_y_continuous(expand = c(0,0)) + theme(strip.background = element_rect(fill="gray85")) +
+  scale_fill_manual(values = colours) + theme(panel.spacing = unit(0.3, "lines")) + 
+  theme(axis.text.x=element_text(angle=90,hjust=0.5,vjust=0.5)) + 
+  guides(fill=guide_legend(title="Taxa"))
+p
+#dev.off()
+
+```
+
+```{r barplots genus}
+
+#and, at genus level?
+barplot_genus <- brk_cls %>% group_by(Sample, Genus) %>% summarize(Abundance=sum(Abundance))
+taxa_to_keep <- barplot_genus %>% group_by(Genus) %>% 
+  summarize(abund=sum(Abundance)) %>%
+  filter(abund>0) 
+taxa_to_keep[order(taxa_to_keep$abund, decreasing=TRUE),]
+
+top_taxa <- (head(taxa_to_keep[order(taxa_to_keep$abund, decreasing=TRUE),], 25))$Genus #the other 2 are so minor
+
+barplot_genus$plot_taxa <- ifelse(barplot_genus$Genus %in% top_taxa,
+                                     yes=barplot_genus$Genus,
+                                     no="others")
+
+bar_plot <- barplot_genus %>% group_by(Sample, plot_taxa) %>% summarize(Abundance=sum(Abundance))
+
+#put the taxa in order so that "others" is last
+top_taxa_order <- c(top_taxa, "others")
+bar_plot$plot_taxa <- factor(bar_plot$plot_taxa,
+                               levels=top_taxa_order)
+
+#add metadata
+bar_plot <- bar_plot %>% rename(Mice.ID_Tube=Sample) %>%
+  full_join(mouse_meta)
+
+#basic bar plot
+bar_plot$fever7d_aboveavg <- factor(bar_plot$fever7d_aboveavg, levels=c("lo", "hi"))
+bar_plot$Mouse_ID <- factor(gsub("X", "", bar_plot$Mice.ID_Tube), levels=c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+                                                                           "11", "12", "13", "14", "15", "16", "17", "18", "19", "20",
+                                                                           "21", "22", "23", "24"))
+
+#define colours to use in plots #25 + others
+colours <- c("steelblue", "goldenrod1","forestgreen", "lightblue1", "lightpink", "red", 
+             "darkorchid3", "darkseagreen1", "khaki1",  "palevioletred", "darkturquoise", "darkorange2",
+             "gray95", "plum1", "blue",  "purple", "yellow", 
+             "green", "orange", "turquoise",
+             "chartreuse4", "thistle3", "firebrick3", "lightsteelblue2", "saddlebrown",
+             "black", "white")
+
+#pdf(width=10, height=5, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/S12A_barplots_all_genus.pdf")
+p <- ggplot(bar_plot, aes(Mouse_ID, Abundance, fill=plot_taxa)) + 
+  geom_bar(stat="identity", colour="black") +
+  facet_grid(. ~ fever7d_aboveavg, drop=FALSE,scale="free",space="free_x") + 
+  theme_bw() +
+  labs(x="Sample", y="Proportion") + 
+  scale_y_continuous(expand = c(0,0)) + theme(strip.background = element_rect(fill="gray85")) +
+  scale_fill_manual(values = colours) + theme(panel.spacing = unit(0.3, "lines")) + 
+  theme(axis.text.x=element_text(angle=90,hjust=0.5,vjust=0.5)) + 
+  guides(fill=guide_legend(title="Taxa"))
+p
+#dev.off()
+
+#why is there an NA genus?
+bar_plot %>% filter(is.na(plot_taxa)) #ohh it's because the whole mouse is gone
+
+#check the taxonomy of these (family level) so I can clarify which ones are Lachnos
+top_taxa_fam <- data.frame(Genus=top_taxa, TopTaxa=c("yes")) %>% full_join(tax) %>% filter(!is.na(TopTaxa)) %>%
+  filter(!duplicated(Genus))
+
+```
+
+```{r waltera}
+##did waltera colonize at all??
+brk_cls %>% filter(Genus=="Acetatifactor") #it's at very low abundance
+
+#plot summarized Acetatifactor abundance, genus level.
+waltera <- brk_cls %>% filter(Genus=="Acetatifactor")  %>%
+  group_by(Sample, Genus) %>% summarize(Abundance=sum(Abundance))
+
+#add metadata
+waltera <- waltera %>% rename(Mice.ID_Tube=Sample) %>%
+  full_join(mouse_meta)
+
+waltera$fever7d_aboveavg <- factor(waltera$fever7d_aboveavg, levels=c("lo", "hi"))
+
+#plot
+#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/GF_Waltera_bygroup.pdf")
+p <- ggplot(waltera, aes(x=fever7d_aboveavg, y=Abundance)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0) + theme_bw() +
+  annotate('segment', x=1, xend=2, y=0.05, yend=0.05) +
+  annotate('text', x=1.5, y=0.055, label=c("ns")) +
+  xlab("Fever") + ylab("Waltera (Rel. Abund.)")
+p
+#dev.off()
+
+#no difference, if anything the trend is opposite
+wilcox.test(waltera$Abundance ~ waltera$fever7d_aboveavg) #NS
+summary(waltera$Abundance)
+
+#what about total Lachnospiraceae levels?
+lachno <- brk_cls %>% filter(Family=="Lachnospiraceae")  %>%
+  group_by(Sample, plot_taxa) %>% summarize(Abundance=sum(Abundance))
+
+#add metadata
+lachno <- lachno %>% rename(Mice.ID_Tube=Sample) %>%
+  full_join(mouse_meta)
+
+lachno$fever7d_aboveavg <- factor(lachno$fever7d_aboveavg, levels=c("lo", "hi"))
+
+#plot
+p <- ggplot(lachno, aes(x=fever7d_aboveavg, y=Abundance)) + geom_boxplot(outlier.shape=NA) + 
+  geom_jitter(width=0.1, height=0)
+p #looks very similar between the groups
+
+#does Waltera colonization correlate wtih any of the outcomes of interest?
+p <- ggplot(waltera, aes(x=Abundance, y=dT_24h)) + geom_point() + 
+  geom_smooth(method='lm')
+p #no correlation
+
+p <- ggplot(waltera, aes(x=Abundance, y=IL6_24h)) + geom_point() + 
+  geom_smooth(method='lm')
+p #vageuly positive
+
+```
+
+
+```{r prep data for maaslin and plotting}
+#make dataframes compatible for Maaslin2, at different taxonomic levels
+feces_df <- brk_cls %>% dplyr::select(Phylum, Family, Genus, Species, Sample, Abundance) %>% 
+  pivot_wider(names_from=Sample, values_from=Abundance)
+head(feces_df) 
+
+#species #essentially strain level
+feces_df_species <- feces_df %>% dplyr::select(-c(Phylum, Family, Genus)) %>% as.data.frame()
+row.names(feces_df_species) <- feces_df_species$Species
+feces_df_species$Species <- NULL
+mouse_meta <- mouse_meta[order(mouse_meta$Mice.ID_Tube),] #order
+mouse_meta <- mouse_meta %>% filter(Mice.ID_Tube %in% names(feces_df_species)) #filter - no missing mouse
+feces_df_species <- feces_df_species[,order(names(feces_df_species))] #order
+identical(names(feces_df_species), mouse_meta$Mice.ID_Tube)
+
+#genus
+feces_df_genus <- brk_cls %>% dplyr::select(Genus, Sample, Abundance) %>%
+  group_by(Sample, Genus) %>% summarize(Abundance=sum(Abundance)) %>%
+  pivot_wider(names_from=Sample, values_from=Abundance) %>%
+  as.data.frame()
+head(feces_df_genus)
+#cleanup
+feces_df_genus$Genus[1] <- "Unknown"
+row.names(feces_df_genus) <- feces_df_genus$Genus
+feces_df_genus$Genus <- NULL
+mouse_meta <- mouse_meta[order(mouse_meta$Mice.ID_Tube),] #order
+mouse_meta <- mouse_meta %>% filter(Mice.ID_Tube %in% names(feces_df_genus)) #filter - no missing mouse
+feces_df_genus <- feces_df_genus[,order(names(feces_df_genus))] #order
+identical(names(feces_df_genus), mouse_meta$Mice.ID_Tube)
+
+#later, for plotting
+plot_gen <- data.frame(t(feces_df_genus), mouse_meta)
+plot_spec <- data.frame(t(feces_df_species), mouse_meta)
+
+row.names(mouse_meta) <- mouse_meta$Mice.ID_Tube
+
+```
+
+```{r add correct sequencing depth}
+##Read Files - QC
+seqstats <- read.table("/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/reports/final/seqkit_stats.tsv", header=TRUE) 
+seqstats
+
+seqstats$Mice.ID_Tube <- paste("X", seqstats$Sample, sep="")
+
+mouse_meta <- seqstats %>% filter(Read==1) %>% dplyr::select(Mice.ID_Tube, num_seqs) %>%
+  rename(seq_depth_mouse=num_seqs) %>%
+  full_join(mouse_meta)
+
+```
+
+```{r maaslin2}
+
+##Q1 #by group #genus
+fit_data = Maaslin2(
+  input_data = feces_df_genus, 
+  input_metadata = mouse_meta, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth_mouse", "fever7d_aboveavg"),
+  random_effects = c("Participant_ID"), #donor as random effect 
+  normalization="tss", #total sum scaling
+  min_abundance=0.0001, #min abundance 10^-3; anything lower gets unbelievable
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+all_gen <- fit_data$results
+all_gen <-  all_gen %>% dplyr::filter(metadata=="fever7d_aboveavg") 
+all_gen %>% filter(qval<0.05)
+#write.csv(all_gen, "/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/profiling/maaslin2_results/Mouse_FeverDonor_Genus_all.csv")
+
+#by group, all 3 groups, consistent over time #species
+fit_data = Maaslin2(
+  input_data = feces_df_species, 
+  input_metadata = mouse_meta, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth_mouse", "fever7d_aboveavg"),
+  random_effects = c("Participant_ID"), #donor as random effect 
+  normalization="tss", #total sum scaling
+  min_abundance=0.0001, #min abundance 10^-3; anything lower gets unbelievable
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+all_spec <- fit_data$results
+all_spec <- all_spec %>% dplyr::filter(metadata=="fever7d_aboveavg") 
+all_spec %>% filter(qval<0.05)
+#write.csv(all_spec, "/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/profiling/maaslin2_results/Mouse_FeverDonor_Species_all.csv")
+
+#So. Very little is different by group.
+all_spec %>% filter(pval<0.05) %>% as.data.frame()
+
+```
+
+```{r plot maaslin2 hits}
+all_gen <- read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/profiling/maaslin2_results/Mouse_FeverDonor_Genus_all.csv")
+all_spec <- read.csv("/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/profiling/maaslin2_results/Mouse_FeverDonor_Species_all.csv")
+
+#plot the raw species results, coloured by family, in case this is more informative
+all_spec_plot <- all_spec %>% 
+  rename(Species=feature) %>%
+  mutate(Species=gsub(".", " ", Species, fixed=TRUE)) %>%
+  full_join(tax) %>%
+  filter(pval<0.05)
+
+all_spec_plot$Species <- factor(all_spec_plot$Species, 
+                                 levels=all_spec_plot[order(all_spec_plot$coef, decreasing=TRUE),]$Species)
+
+#sanity check on direction : the Lachnos are UP in fever high. Right?
+p <- ggplot(plot_spec, aes(x=fever7d_aboveavg, y=Eisenbergiella.tayi)) + geom_boxplot() #correct.
+
+#adjust the coef if needed because maaslin2 was run lo vs hi instead of hi vs lo
+all_spec_plot$coef <- all_spec_plot$coef*-1
+
+#pdf(width=5, height=3, "/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/plots/RawSig_SpeciesHits_FeverHiVsLo.pdf")
+p <- ggplot(all_spec_plot, aes(x=coef, y=Species, fill=Phylum)) + 
+  geom_bar(stat='identity', colour='black') + 
+  theme_minimal() +
+  ggtitle("Species: Fever-hi vs lo") +
+  scale_fill_manual(values=c("aliceblue", "goldenrod", "deepskyblue2"))
+p
+#dev.off()
+
+#export the raw plot to annotate motility
+#write.csv(all_spec_plot, "/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/profiling/maaslin2_results/Mouse_FeverDonor_Species_rawhits.csv")
+
+#similar for genus level
+#plot the raw genus results, coloured by family, in case this is more informative
+all_gen_plot <- all_gen %>% 
+  rename(Genus=feature) %>%
+  mutate(Genus=gsub(".", " ", Genus, fixed=TRUE)) %>%
+  full_join(tax) %>% filter(!duplicated(Genus)) %>% #because each Genus has all the species taxonomy, etc.
+  filter(pval<0.05)
+
+#adjust the coef if needed because maaslin2 was run lo vs hi instead of hi vs lo
+all_gen_plot$coef <- all_gen_plot$coef*-1
+all_gen_plot$metadata <- c("hi")
+
+all_gen_plot$Genus <- factor(all_gen_plot$Genus, 
+                                 levels=all_gen_plot[order(all_gen_plot$coef, decreasing=TRUE),]$Genus)
+
+#pdf(width=5, height=3, "/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/plots/RawSig_GenusHits_FeverHiVsLo.pdf")
+p <- ggplot(all_gen_plot, aes(x=coef, y=Genus, fill=Phylum)) + 
+  geom_bar(stat='identity', colour='black') + 
+  theme_minimal() +
+  ggtitle("Genera: Fever-hi vs lo") +
+  scale_fill_manual(values=c("aliceblue", "goldenrod", "deepskyblue2"))
+p
+#dev.off()
+
+#export the raw plot to annotate motility
+#write.csv(all_gen_plot, "/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/profiling/maaslin2_results/Mouse_FeverDonor_Genus_rawhits.csv")
+
+
+```
+
+```{r maaslin2 real immune data}
+
+##taxa that correlate with post-fever ∆T or IL6
+#species
+fit_data = Maaslin2(
+  input_data = feces_df_species, 
+  input_metadata = mouse_meta, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth_mouse", "dT_24h"),
+  random_effects = c("Participant_ID"), #donor as random effect 
+  normalization="tss", #total sum scaling
+  min_abundance=0.0001, #min abundance 10^-3; anything lower gets unbelievable
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+dT_spec <- fit_data$results 
+dT_spec <- dT_spec %>% dplyr::filter(metadata=="dT_24h") 
+dT_spec %>% filter(qval<0.05) %>% as.data.frame() #a single Bacteroides correlates significantly (positively) with ∆T
+as.data.frame(dT_spec %>% filter(pval<0.05))
+#write.csv(dT_spec, "/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/profiling/maaslin2_results/Mouse_dT_Species_all.csv")
+
+#same thing at genus level:
+fit_data = Maaslin2(
+  input_data = feces_df_genus, 
+  input_metadata = mouse_meta, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth_mouse", "dT_24h"),
+  random_effects = c("Participant_ID"), #donor as random effect 
+  normalization="tss", #total sum scaling
+  min_abundance=0.0001, #min abundance 10^-3; anything lower gets unbelievable
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+dT_gen <- fit_data$results 
+dT_gen <- dT_gen %>% dplyr::filter(metadata=="dT_24h") 
+dT_gen %>% filter(qval<0.05) %>% as.data.frame() #nothing
+as.data.frame(dT_gen %>% filter(pval<0.05)) #Christensenella shows up negatively with ∆T
+#write.csv(dT_gen, "/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/profiling/maaslin2_results/Mouse_dT_genus_all.csv")
+
+#IL6 24h
+#species
+fit_data = Maaslin2(
+  input_data = feces_df_species, 
+  input_metadata = mouse_meta, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth_mouse", "IL6_24h"),
+  random_effects = c("Participant_ID"), #donor as random effect 
+  normalization="tss", #total sum scaling
+  min_abundance=0.0001, #min abundance 10^-3; anything lower gets unbelievable
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+IL6_spec <- fit_data$results 
+IL6_spec <- IL6_spec %>% dplyr::filter(metadata=="IL6_24h") 
+IL6_spec %>% filter(qval<0.05) %>% as.data.frame() #nothing
+as.data.frame(IL6_spec %>% filter(pval<0.05)) #a Prevotella and a Bacteroides are the top hits
+#write.csv(IL6_spec, "/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/profiling/maaslin2_results/Mouse_IL6_Species_all.csv")
+
+#genus
+fit_data = Maaslin2(
+  input_data = feces_df_genus, 
+  input_metadata = mouse_meta, 
+  output = "maaslin2_output", 
+  fixed_effects = c("seq_depth_mouse", "IL6_24h"),
+  random_effects = c("Participant_ID"), #donor as random effect 
+  normalization="tss", #total sum scaling
+  min_abundance=0.0001, #min abundance 10^-3; anything lower gets unbelievable
+  min_prevalence=0.25, #must be present in 25% of samples
+  max_significance=0.05, #calm down with the non significant associations and plots
+  plot_scatter=FALSE
+)
+IL6_gen <- fit_data$results 
+IL6_gen <- IL6_gen %>% dplyr::filter(metadata=="IL6_24h") 
+IL6_gen %>% filter(qval<0.05) %>% as.data.frame() #nothing
+as.data.frame(IL6_gen %>% filter(pval<0.05)) #nothing very convincing
+#write.csv(IL6_gen, "/ebio/abt3_projects2/uHEAT/data/Mouse/MouseMicrobiome/profiling/maaslin2_results/Mouse_IL6_Genus_all.csv")
+
+```

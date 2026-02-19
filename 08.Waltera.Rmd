@@ -149,15 +149,15 @@ gc_plot_summary <- gc_all_plot %>%
   dplyr::group_by(Bacteria) %>%
   dplyr::summarize(mean=mean(Relative_Growth), se=se(Relative_Growth))
 
-
-#pdf(width=3, height=3, "/ebio/abt3_projects2/uHEAT/data/Waltera/Wi_vs_others_CMC_simple_reps123.pdf")
+#pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/5C_Wi_vs_others_CMC_simple_reps123.pdf")
 p <- ggplot(gc_plot_summary, aes(x=Bacteria, y=mean)) +
   geom_point(size=3, colour='black') + 
   geom_errorbar(aes(ymin=mean-se, ymax=mean+se), width=.2,
                  position=position_dodge(0.05)) +
   annotate('segment', y=1, yend=1, x=0.5, xend=6.5, linetype=2) +
   xlab("Bacterial Species") + ylab("Relative Growth in CMC") +
-  theme_minimal()
+  theme_minimal() +
+    theme(axis.line = element_line(colour = "black"))
 p
 #dev.off()
 
@@ -187,16 +187,18 @@ wcell_htlr5 <- wcell %>% filter(Cell=="hTLR5") %>%
   pivot_longer(cols=c(1:2), names_to="Condition", values_to = "FliC")
 
 wilcox.test(wcell_htlr5$FliC~wcell_htlr5$Condition)
+wcell_htlr5$Condition <- gsub("Wi", "Waltera", wcell_htlr5$Condition)
+wcell_htlr5$Condition <- gsub("PBS", "Blank", wcell_htlr5$Condition)
 
-#pdf(width=2.5, height=3, "/ebio/abt3_projects2/uHEAT/data/CleanPlots/5G.WalteraFliC.pdf")
+#pdf(width=2, height=3, "/ebio/abt3_projects2/uHEAT/data/RevisionPlots/3G.WalteraFliC.pdf")
 p <- ggplot(wcell_htlr5, aes(x=Condition, y=FliC)) + geom_boxplot(outlier.shape=NA) + 
-  geom_jitter(width=0.1, height=0, size=3) + 
+  geom_jitter(width=0.1, height=0) + 
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
                panel.background = element_blank(), axis.line = element_line(colour = "black"),
                axis.title.y = element_text(margin = margin(r = 10))) + 
   xlab(NULL) + ylab("FliC (µg/mL)") +
   annotate('segment', x=1, xend=2, y=0.8, yend=0.8) + 
-  annotate('text', x=1.5, y=0.82, label="*", size=5) 
+  annotate('text', x=1.5, y=0.82, label="*", size=6) 
 p
 #dev.off()
 
